@@ -683,7 +683,7 @@ class PolyBounds_SIP:
         if P_exact is not None:
             print("Exact overlap:", P_exact)
 
-    def optimize_sos(self, intervals, lower_coefs_list, solver="SCS", verbose=False, global_bnd=None, solver_max_iters=None, poly_degrees=None):
+    def optimize(self, intervals, lower_coefs_list, solver="SCS", verbose=False, global_bnd=None, solver_max_iters=None, poly_degrees=None):
         """
         SOS/SDP (power basis) for piecewise polynomial constraints on intervals.
         Two SDPs:
@@ -699,7 +699,7 @@ class PolyBounds_SIP:
         if len(lower_coefs_list) != len(intervals):
             raise ValueError("lower_coefs_list must have the same length as intervals.")
         if poly_degrees is None:
-            poly_degrees = [self.poly_degree]
+            poly_degrees = [i for i in range(3, self.poly_degree)]
         poly_degrees = sorted({int(deg) for deg in poly_degrees})
         if not poly_degrees:
             raise ValueError("poly_degrees must contain at least one degree.")
@@ -1092,7 +1092,7 @@ class OverlapEstimator:
         lower_coefs_list = [[val] for val in region_b]
         values = constraint_recipe.get_moment_values(max_degree)
         sip = PolyBounds_SIP(values, poly_degree=max_degree)
-        solver_output = sip.optimize_sos(
+        solver_output = sip.optimize(
             intervals,
             lower_coefs_list,
             solver=recipe.get("solver", "SCS"),
@@ -1133,7 +1133,7 @@ class OverlapEstimator:
             else:
                 lower_coefs_list.append([b_val])
         sip = PolyBounds_SIP(manual_moments[:max_degree + 1], poly_degree=max_degree)
-        solver_output = sip.optimize_sos(
+        solver_output = sip.optimize(
             intervals,
             lower_coefs_list,
             solver=recipe.get("solver", "SCS"),
