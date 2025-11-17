@@ -7,6 +7,7 @@ from numpy.polynomial import chebyshev
 from numpy.polynomial import Polynomial
 from scipy.optimize import minimize, NonlinearConstraint, linprog
 from scipy.special import eval_chebyt
+import os
 import matplotlib.pyplot as plt
 # Uncomment for production plotting with LaTeX (slower)
 # plt.rcParams.update({
@@ -19,6 +20,7 @@ from overlapanalyzer.utils import exp_val_higher_moment
 from overlapanalyzer.contour_integration import getContourDataFromEndPoints
 from overlapanalyzer.alg_LinearOp import linear_solver
 from overlapanalyzer.polynomial_estimates import rescale_E
+import overlapanalyzer.visualization as viz
 from scipy.special import comb
 
 def f_piecewise(x, x0, x1):
@@ -326,12 +328,8 @@ class PB_linprog_params_from_eig:
         if custom_constraints is not None:
             self.constraint_pts = custom_constraints
         else:
-            # Validate inputs
-            if not use_exact_energies and (bound_extension is None or dense_info is None or num_x_points is None):
-                raise ValueError("(bound_extension, dense_size, num_x_points) are required when use_exact_energies=False.")
-
             # Below, we use a symmetric bound extension for the ground and highest excited states in gen_bound_pairs; can be changed in future
-            if not use_exact_energies:
+            if bound_extension is not None:
                 self.bound_pairs, self.incl_endpoints, self.nonzero_b_indices = process_bound_pairs(gen_bound_pairs(self.unscaled_energies, bound_extension), target_indices, dense_info)
 
             self.constraint_pts = self._get_exact_constraints() if use_exact_energies else self._get_dense_constraints()
@@ -356,6 +354,8 @@ class PB_linprog_params_from_eig:
         """
         Generate dense constraints based on bound pairs and number of discretization points.
         """
+        if self.num_x_points is None:
+            raise ValueError("num_x_points must be provided when use_exact_energies is False.")
         if len(self.num_x_points) != len(self.bound_pairs):
             raise ValueError("num_x_points must match the number of bound pairs! Check the number of constraint regions.")
         energy_constraints = []
@@ -364,6 +364,12 @@ class PB_linprog_params_from_eig:
                 energy_constraints.extend(np.linspace(lower, upper, self.num_x_points[i], endpoint=self.incl_endpoints[i]))
         # energy_constraints = np.concatenate(energy_constraints)
         return self._rescale(energy_constraints)
+    
+    def get_approx_intervals(self):
+        """
+        Get constraint regions for approx mode.
+        """
+        return self._rescale(self.bound_pairs)
 
     def get_A_ub(self, poly_degree):
         """Return A_ub."""
@@ -529,6 +535,7 @@ class PolyBounds_new():
         self.max_poly_degree = len(values) - 1
         self.poly_degree = self.max_poly_degree
         self.multi_degree_results = None
+        self.O_exact = P_exact
         if P_exact is not None:
             print("Exact overlap: ", P_exact)
     
@@ -541,11 +548,11 @@ class PolyBounds_new():
         coeffs = chebyshev.chebfit(chebyshev_nodes, y_nodes, n)
         return coeffs
     
-    def optimize(self, poly_degrees=None, bound=1e20, method='highs', linprog_options=None):
+    def optimize(self, poly_degrees=None, bound=1e20, method='highs', linprog_options=None, visualize=False, **kwargs):
         if linprog_options is None:
             linprog_options = {}
         if poly_degrees is None:
-            poly_degrees = [i for i in range(3, self.poly_degree)]
+            poly_degrees = [self.poly_degree]
         poly_degrees = sorted({int(deg) for deg in poly_degrees})
         if not poly_degrees:
             raise ValueError("poly_degrees must contain at least one degree.")
@@ -570,48 +577,66 @@ class PolyBounds_new():
                     print(f"Poly degree {deg} {bound_name} optimization failed: {result.message}")
                     degree_bounds.append(np.nan)
             cheb_coeffs = self.compute_chebyshev_coeffs(n=deg) if deg >= 0 else np.array([0.0])
+            save_plots = bool(kwargs.get('save_plots', False))
+            save_dir = kwargs.get('save_dir', None)
+            mode_name = kwargs.get('mode', None)
+            show_plot = bool(kwargs.get('show', visualize))
+            if (visualize or save_plots) and LB_result.success and UB_result.success:
+                plot_kwargs = {
+                    "LB_result": LB_result,
+                    "UB_result": UB_result,
+                    "poly_degree": deg,
+                    "bounds": degree_bounds,
+                    "used_cheb": kwargs.get("used_cheb", False),
+                    "legend_anchor": kwargs.get("legend_anchor", (1,0.2)),
+                    "show_constraint_points": kwargs.get("show_constraint_points", True),
+                    "linewidth": kwargs.get("linewidth", 1),
+                    "show_spectrum": kwargs.get("show_spectrum", False),
+                    "show_lowest_highest": kwargs.get("show_lowest_highest", False),
+                    "constraint_recipe_obj": kwargs.get("constraint_recipe_obj"),
+                    "plot_title": (kwargs.get("plot_title","")),
+                    "plot_chebyshev": kwargs.get("plot_chebyshev", False),
+                    "truncate_lower": kwargs.get("truncate_lower"),
+                }
+                # prepare save path if requested
+                save_path = None
+                if save_plots and save_dir:
+                    os.makedirs(save_dir, exist_ok=True)
+                    title_safe = (plot_kwargs.get('plot_title') or '').replace(' ', '_') or 'bounds'
+                    mode_safe = (mode_name or '').replace(' ', '_')
+                    fname = f"{title_safe}_deg{deg}.pdf"
+                    save_path = os.path.join(save_dir, fname)
+                plot_kwargs.update({
+                    'show': show_plot,
+                    'save_path': save_path
+                })
+                self.plot_results(
+                    constraint_pts=self.constraint_pts,
+                    **plot_kwargs,
+                )
             cheb_value = np.dot(current_values, cheb_coeffs[:deg + 1]) if deg >= 0 else 0.0
             summaries.append({
-                "degree": deg,
+                "poly_degree": deg,
                 "LB_result": LB_result,
                 "UB_result": UB_result,
                 "bounds": degree_bounds,
                 "chebyshev_coeffs": cheb_coeffs,
                 "chebyshev_value": cheb_value
             })
-
-        if len(summaries) == 1:
-            summary = summaries[0]
-            self.poly_degree = summary["degree"]
-            self.LB_result = summary["LB_result"]
-            self.UB_result = summary["UB_result"]
-            self.bounds = summary["bounds"]
-            self.chebyshev_coeffs = summary["chebyshev_coeffs"]
-            self.chebyshev_approximation = summary["chebyshev_value"]
-            self.multi_degree_results = None
-            print("Chebyshev Approximation Value: ", self.chebyshev_approximation)
-            return self.LB_result, self.UB_result, self.bounds
-
-        self.multi_degree_results = summaries
-        self.poly_degree = summaries[-1]["degree"]
-        self.LB_result = summaries[-1]["LB_result"]
-        self.UB_result = summaries[-1]["UB_result"]
-        self.bounds = summaries[-1]["bounds"]
-        self.chebyshev_coeffs = summaries[-1]["chebyshev_coeffs"]
-        self.chebyshev_approximation = summaries[-1]["chebyshev_value"]
-        print("Chebyshev Approximation Value (last degree): ", self.chebyshev_approximation)
         return summaries
-    
-    def plot_results(self, constraint_pts, n_plot_points=1000, used_cheb=True, legend_anchor=(1,0.2), show_constraint_points=False, limit_adjust=(0,0), linewidth=1, show_spectrum=False, show_lowest_highest=False, constraint_recipe_obj=None, plot_title=None, plot_chebyshev=False, truncate_lower=None):
+
+    def plot_results(self, constraint_pts, n_plot_points=1000, used_cheb=False, legend_anchor=(1,0.2), show_constraint_points=False, limit_adjust=(0,0), linewidth=1, show_spectrum=False, show_lowest_highest=False, constraint_recipe_obj=None, plot_title=None, plot_chebyshev=False, truncate_lower=None, show=False, save_path=None, **kwargs):
         """
         constraint_pts: the constraint points used in the optimization.
         """
         poly_plot_points = np.linspace(constraint_pts[0], constraint_pts[-1], n_plot_points)
         if truncate_lower is not None:
-            poly_plot_points_lower = np.linspace(constraint_pts[0], constraint_pts[-1]-(constraint_pts[-1]-constraint_pts[-0])*truncate_lower, n_plot_points)
-        LB_polynomial = chebyshev.Chebyshev(self.LB_result.x) if used_cheb else Polynomial(self.LB_result.x)
+            # compute truncated lower interval correctly
+            span = constraint_pts[-1] - constraint_pts[0]
+            poly_plot_points_lower = np.linspace(constraint_pts[0], constraint_pts[-1] - span * truncate_lower, n_plot_points)
+        LB_polynomial = chebyshev.Chebyshev(kwargs.get('LB_result').x) if used_cheb else Polynomial(kwargs.get('LB_result').x)
         LB_polynomial_values = LB_polynomial(poly_plot_points) if truncate_lower is None else LB_polynomial(poly_plot_points_lower)
-        UB_polynomial = chebyshev.Chebyshev(self.UB_result.x) if used_cheb else Polynomial(self.UB_result.x)
+        UB_polynomial = chebyshev.Chebyshev(kwargs.get('UB_result').x) if used_cheb else Polynomial(kwargs.get('UB_result').x)
         UB_polynomial_values = UB_polynomial(poly_plot_points)
         f_values = self.b_ub
         # ax1=plt.gca()
@@ -625,7 +650,7 @@ class PolyBounds_new():
         ax1.plot(constraint_pts, f_values, label=r'$f_0(E)$', linestyle='--', color='red', linewidth=linewidth)
         # Overlay the spectrum information
         if plot_chebyshev:
-            t_vals = 2 * (poly_plot_points - self.constraint_pts[0]) / (self.constraint_pts[-1] - self.constraint_pts[0]) - 1  # Map x to [-1,1]
+            t_vals = 2 * (poly_plot_points - constraint_pts[0]) / (constraint_pts[-1] - constraint_pts[0]) - 1  # Map x to [-1,1]
             y_cheb = chebyshev.chebval(t_vals, self.chebyshev_coeffs)
             ax1.plot(poly_plot_points, y_cheb, label=f"Chebyshev Approximation", color='magenta', linewidth=linewidth)
         if show_spectrum:
@@ -641,18 +666,29 @@ class PolyBounds_new():
             ax1.axvline(x=constraint_recipe_obj.exact_energies[-1], color='gray', linestyle=':')
         if show_constraint_points:
             ax1.scatter(constraint_pts, [0 for _ in range(len(constraint_pts))], color='pink', marker='|', zorder=4)
-            # print("Constraint points: ", self.constraint_pts)
             
         # Add labels and legend
         if plot_title is not None:
-            ax1.set_title(plot_title+ f', Degree={self.poly_degree}' + r', $O_{exact}=$' + f'{self.O_exact:.3f}' + r', $O_{LB}=$' + f'{self.bounds[0]:.3f}' + r', $O_{UB}=$' + f'{self.bounds[1]:.3f}')
+            # ax1.set_title(plot_title+ f', Degree={kwargs.get("poly_degree")}' + r', $O_{exact}=$' + f'{self.O_exact:.3f}' + r', $O_{LB}=$' + f'{kwargs.get("bounds")[0]:.3f}' + r', $O_{UB}=$' + f'{kwargs.get("bounds")[1]:.3f}')
+            ax1.set_title(plot_title+ f', Degree={kwargs.get("poly_degree")}' + f', [{kwargs.get("bounds")[0]:.3f}, {kwargs.get("bounds")[1]:.3f}] ({self.O_exact:.3f})')
             ax1.set_xlabel('Energy')
         ax1.set_ylabel('Function Value')
-        # plt.ylabel('f(E)')
-        fig.legend(loc='lower right', bbox_to_anchor=legend_anchor, bbox_transform=ax1.transAxes)
+        # fig.legend(loc='lower right', bbox_to_anchor=legend_anchor, bbox_transform=ax1.transAxes)
         plt.tight_layout()
-        # plt.grid(True)
-        plt.show()
+        # Save if requested
+        if save_path:
+            try:
+                os.makedirs(os.path.dirname(save_path) or '.', exist_ok=True)
+            except Exception:
+                pass
+            try:
+                fig.savefig(save_path, format='pdf')
+            except Exception:
+                fig.savefig(save_path)
+        # Show if requested
+        if show:
+            plt.show()
+        plt.close(fig)
 
 # helper: turn Gram matrix into coefficients of v^T Q v
 def gram_to_coefs(Q, deg):
@@ -674,16 +710,17 @@ class PolyBounds_SIP:
     - SOS/SDP method (via cvxpy)
     """
 
-    def __init__(self, values, poly_degree=None, P_exact=None):
+    def __init__(self, values, poly_degree=None, O_exact=None):
         self.values = np.array(values)
         self.poly_degree = poly_degree if poly_degree is not None else len(values)-1
         self.bounds = []
         self.method_used = None
         self.multi_degree_results = None
-        if P_exact is not None:
-            print("Exact overlap:", P_exact)
+        self.O_exact = O_exact
+        if O_exact is not None:
+            print("Exact overlap:", O_exact)
 
-    def optimize(self, intervals, lower_coefs_list, solver="SCS", verbose=False, global_bnd=None, solver_max_iters=None, poly_degrees=None):
+    def optimize(self, intervals, lower_coefs_list, solver="SCS", verbose=False, global_bnd=None, solver_max_iters=None, poly_degrees=None, visualize=False, **kwargs):
         """
         SOS/SDP (power basis) for piecewise polynomial constraints on intervals.
         Two SDPs:
@@ -699,7 +736,7 @@ class PolyBounds_SIP:
         if len(lower_coefs_list) != len(intervals):
             raise ValueError("lower_coefs_list must have the same length as intervals.")
         if poly_degrees is None:
-            poly_degrees = [i for i in range(3, self.poly_degree)]
+            poly_degrees = [self.poly_degree]
         poly_degrees = sorted({int(deg) for deg in poly_degrees})
         if not poly_degrees:
             raise ValueError("poly_degrees must contain at least one degree.")
@@ -719,9 +756,8 @@ class PolyBounds_SIP:
 
             def interval_constraints(cvar, sign):
                 cons = []
-                for (a, b), lcoefs in zip(intervals, lower_coefs_list):
-                    deg_r = max(n, len(lcoefs) - 1)
-                    deg_r = int(max(0, deg_r))
+                for (a, b), lcoef in zip(intervals, lower_coefs_list):
+                    deg_r = int(max(0, n))
                     if deg_r % 2 == 0:
                         d0 = deg_r // 2
                         d1 = max(0, (deg_r - 2) // 2)
@@ -735,7 +771,7 @@ class PolyBounds_SIP:
                             for j in range(len(quad)):
                                 conv[i + j] += s1[i] * quad[j]
                         cp_poly = [cvar[i] if i <= n else 0 for i in range(deg_r + 1)]
-                        lp = list(lcoefs[:deg_r + 1]) + [0] * max(0, deg_r + 1 - len(lcoefs))
+                        lp = [lcoef] + [0] * deg_r
                         rcoefs = [sign * (cp_poly[k] - lp[k]) for k in range(deg_r + 1)]
                         L = max(len(rcoefs), len(s0), len(conv))
                         def pad(lst):
@@ -760,7 +796,7 @@ class PolyBounds_SIP:
                             term_b[i] += b * sb[i]
                             term_b[i + 1] -= sb[i]
                         cp_poly = [cvar[i] if i <= n else 0 for i in range(deg_r + 1)]
-                        lp = list(lcoefs[:deg_r + 1]) + [0] * max(0, deg_r + 1 - len(lcoefs))
+                        lp = [lcoef] + [0] * deg_r
                         rcoefs = [sign * (cp_poly[k] - lp[k]) for k in range(deg_r + 1)]
                         L = max(len(rcoefs), len(term_a), len(term_b))
                         def pad(lst):
@@ -804,63 +840,135 @@ class PolyBounds_SIP:
                 "UB_result": ub_dummy
             }
 
-        summaries = [solve_for_degree(deg) for deg in poly_degrees]
         self.method_used = "sos"
-        if len(summaries) == 1:
-            summary = summaries[0]
-            self.poly_degree = summary["degree"]
-            self.bounds = summary["bounds"]
-            self.c_LB = summary["c_LB"]
-            self.c_UB = summary["c_UB"]
-            self.LB_result = summary["LB_result"]
-            self.UB_result = summary["UB_result"]
-            self.multi_degree_results = None
-            return summary["LB_problem"], summary["UB_problem"], self.bounds
-
-        self.multi_degree_results = summaries
-        self.poly_degree = summaries[-1]["degree"]
-        self.bounds = summaries[-1]["bounds"]
-        self.c_LB = summaries[-1]["c_LB"]
-        self.c_UB = summaries[-1]["c_UB"]
-        self.LB_result = summaries[-1]["LB_result"]
-        self.UB_result = summaries[-1]["UB_result"]
+        summaries = []
+        for deg in poly_degrees:
+            summary = solve_for_degree(deg)
+            summaries.append(summary)
+            # handle visualization and optional saving
+            save_plots = bool(kwargs.get('save_plots', False))
+            save_dir = kwargs.get('save_dir', None)
+            mode_name = kwargs.get('mode', None)
+            show_plot = bool(kwargs.get('show', visualize))
+            if visualize or save_plots:
+                base_title = kwargs.get("plot_title", "")
+                title = (base_title + " ").rstrip()
+                save_path = None
+                if save_plots and save_dir:
+                    os.makedirs(save_dir, exist_ok=True)
+                    title_safe = title.replace(' ', '_')
+                    fname = f"{title_safe}_deg{deg}.pdf"
+                    save_path = os.path.join(save_dir, fname)
+                self.plot_results(
+                    intervals,
+                    deg,
+                    lower_coefs_list,
+                    n_plot_points=kwargs.get("n_plot_points", 500),
+                    title=title,
+                    show_spectrum=kwargs.get("show_spectrum", False),
+                    linewidth=kwargs.get("linewidth", 1),
+                    exact_energies=kwargs.get("exact_energies"),
+                    exact_overlaps=kwargs.get("exact_overlaps"),
+                    c_LB=summary.get("c_LB"),
+                    c_UB=summary.get("c_UB"),
+                    bounds=summary.get("bounds"),
+                    method="sos",
+                    show=show_plot,
+                    save_path=save_path,
+                    mode=mode_name,
+                )
+        self.method_used = "sos"
         return summaries
 
 
 
-    def plot_results(self, intervals, lower_coefs_list=None,
-                     n_plot_points=500, linewidth=2, title=None, show_spectrum=False, **kwargs):
+    def plot_results(self, intervals, poly_degree=None, lower_coefs_list=None, n_plot_points=500, linewidth=2, title=None, show_spectrum=False, show=True, save_path=None, legend_anchor=(1,0.2), show_constraint_points=False, plot_chebyshev=False, constraint_recipe_obj=None, truncate_lower=None, **kwargs):
         """
-        Plot optimized polynomials and constraint functions.
-        For exchange: lower_funcs must be provided.
-        For sos: lower_coefs_list must be provided.
+        Plot optimized polynomials and constraint functions using the same style as PolyBounds_new.plot_results.
+        Accepts `show` and `save_path` to control display and saving.
         """
-        fig, ax = plt.subplots()
+        fig = plt.figure()
+        ax = fig.add_subplot(111)
 
-
+        # global xs across all intervals
         xs = np.linspace(intervals[0][0], intervals[-1][-1], n_plot_points)
 
-        if self.method_used == "sos":
-            # Power-basis polynomials from SOS
-            LB_poly = Polynomial(self.c_LB)
-            UB_poly = Polynomial(self.c_UB)
-            ax.plot(xs, LB_poly(xs), label="Minorizing poly (LB)", lw=linewidth, color="blue")
-            ax.plot(xs, UB_poly(xs), label="Majorizing poly (UB)", lw=linewidth, color="green")
-            # Plot on each interval with its own constraint l_j
-            for (a,b), lcoefs in zip(intervals, lower_coefs_list or []):
-                xs_piecewise = np.linspace(a, b, 2)
-                f_poly = Polynomial(lcoefs)
-                ax.plot(xs_piecewise, f_poly(xs_piecewise), "--", lw=linewidth, color="red")
-            if show_spectrum:
-                ax2 = ax.twinx()
-                # Placeholder for spectrum plotting; user should provide actual spectrum data
-                ax2.stem(kwargs.get("exact_energies"), kwargs.get("exact_overlaps"), linefmt='grey', markerfmt=' ', basefmt='C0', label='Exact spectrum')
+        # determine polynomial coefficients
+        c_LB = kwargs.get('c_LB', getattr(self, 'c_LB', None))
+        c_UB = kwargs.get('c_UB', getattr(self, 'c_UB', None))
+        if c_LB is not None:
+            LB_poly = Polynomial(c_LB)
+            LB_vals = LB_poly(xs)
+        else:
+            LB_vals = None
+        if c_UB is not None:
+            UB_poly = Polynomial(c_UB)
+            UB_vals = UB_poly(xs)
+        else:
+            UB_vals = None
+
+        # Plot lower and upper polynomials if available
+        if LB_vals is not None:
+            ax.plot(xs, LB_vals, color='blue', label='Lower Bound', linewidth=linewidth)
+        if UB_vals is not None:
+            ax.plot(xs, UB_vals, color='green', label='Upper Bound', linewidth=linewidth)
+
+        # Plot piecewise constraint functions on each interval
+        for (a, b), lcoefs in zip(intervals, lower_coefs_list if lower_coefs_list is not None else []):
+            xs_piece = np.linspace(a, b, max(3, n_plot_points // max(1, len(intervals))))
+            f_poly = Polynomial(lcoefs)
+            ax.plot(xs_piece, f_poly(xs_piece), linestyle='--', color='red', linewidth=linewidth)
+
+        # Optionally show spectrum on twin axis
+        if show_spectrum and constraint_recipe_obj is not None:
+            ax2 = ax.twinx()
+            exact_energies = getattr(constraint_recipe_obj, 'exact_energies', kwargs.get('exact_energies'))
+            exact_overlaps = getattr(constraint_recipe_obj, 'exact_overlaps', kwargs.get('exact_overlaps'))
+            if exact_energies is not None and exact_overlaps is not None:
+                ax2.stem(exact_energies, exact_overlaps, linefmt='grey', markerfmt=' ', basefmt='C0', label='Exact spectrum')
                 ax2.set_ylabel('Overlap')
 
+        # Constraint points marker
+        if show_constraint_points:
+            # plot interval endpoints as markers
+            pts = []
+            for a, b in intervals:
+                pts.extend([a, b])
+            pts = np.array(pts)
+            ax.scatter(pts, np.zeros_like(pts), color='pink', marker='|', zorder=4)
+
+        # Title and legend
         if title:
-            ax.set_title(title + f" (deg={self.poly_degree})")
-        ax.legend()
-        plt.show()
+            # try to include bounds info if provided
+            bounds = kwargs.get('bounds')
+            deg_for_title = poly_degree if poly_degree is not None else getattr(self, 'poly_degree', None)
+            if bounds is not None:
+                oex = getattr(self, "O_exact", None)
+                if oex is not None:
+                    ax.set_title(title + f', Degree={deg_for_title}' + f', [{bounds[0]:.3f}, {bounds[1]:.3f}] ({oex:.3f})')
+                else:
+                    ax.set_title(title + f', Degree={deg_for_title}' + f', [{bounds[0]:.3f}, {bounds[1]:.3f}]')
+            else:
+                ax.set_title(title + f' (deg={deg_for_title})')
+        ax.set_ylabel('Function Value')
+        fig.legend(loc='lower right', bbox_to_anchor=legend_anchor, bbox_transform=ax.transAxes)
+        plt.tight_layout()
+
+        # Save if requested
+        if save_path:
+            try:
+                os.makedirs(os.path.dirname(save_path) or '.', exist_ok=True)
+            except Exception:
+                pass
+            try:
+                fig.savefig(save_path, format='pdf')
+            except Exception:
+                fig.savefig(save_path)
+
+        # Show if requested
+        if show:
+            plt.show()
+        plt.close(fig)
     
 def intervals_from_eigen(eig_results, target_index, b_values):
     """
@@ -959,12 +1067,17 @@ class OverlapEstimator:
         if mode == "manual":
             if recipe.get("intervals") is None:
                 raise ValueError("intervals must be specified for manual mode.")
-            if recipe.get("moments") is None and self.moments is None:
-                raise ValueError("moments must be provided either at initialization or in the recipe for manual mode.")
+            has_moments = any([
+                recipe.get("moments") is not None,
+                recipe.get("moments_file") is not None,
+                self.moments is not None
+            ])
+            if not has_moments:
+                raise ValueError("moments must be provided inline, via moments_file, or at initialization for manual mode.")
         if recipe.get("poly_degrees") is None and recipe.get("poly_degree") is None:
             raise ValueError("Specify poly_degrees or poly_degree in the recipe.")
 
-    def compute_bounds(self, recipe: dict):
+    def compute_bounds(self, recipe: dict, visualize:bool=False, save_plots:bool=False, save_dir: str=None):
         modes = self._normalize_modes(recipe)
         all_payloads = []
         for mode in modes:
@@ -972,14 +1085,90 @@ class OverlapEstimator:
             self._validate_single_mode(mode_recipe)
             poly_degrees = self._normalize_poly_degrees(mode_recipe)
             if mode == "exact":
-                payload = self._compute_exact_mode(mode_recipe, poly_degrees)
+                payload = self._compute_exact_mode(mode_recipe, poly_degrees, visualize=visualize, save_plots=save_plots, save_dir=save_dir, mode=mode)
             elif mode == "approx":
-                payload = self._compute_approx_mode(mode_recipe, poly_degrees)
+                payload = self._compute_approx_mode(mode_recipe, poly_degrees, visualize=visualize, save_plots=save_plots, save_dir=save_dir, mode=mode)
             else:
-                payload = self._compute_manual_mode(mode_recipe, poly_degrees)
+                payload = self._compute_manual_mode(mode_recipe, poly_degrees, visualize=visualize, save_plots=save_plots, save_dir=save_dir, mode=mode)
             all_payloads.append(payload)
         self.last_results = all_payloads[-1] if all_payloads else None
         return all_payloads if len(all_payloads) > 1 else all_payloads[0]
+
+    def save_results(self, results, path, fmt='json'):
+        """Save compute_bounds results to a local file.
+
+        Supported formats: 'json', 'csv', 'pickle'.
+        """
+        import json as _json
+        import pickle as _pickle
+        import csv as _csv
+
+        if results is None:
+            raise ValueError("No results to save")
+        # Normalize to list
+        payloads = results if isinstance(results, (list, tuple)) else [results]
+        def _to_basic(o):
+            # Convert payloads into JSON/pickle-safe basic Python structures
+            if isinstance(o, dict):
+                new = {}
+                for k, v in o.items():
+                    # ensure key is a string
+                    try:
+                        key = k if isinstance(k, (str, int, float, bool)) or k is None else str(k)
+                    except Exception:
+                        key = str(k)
+                    new[str(key)] = _to_basic(v)
+                return new
+
+            if isinstance(o, (list, tuple, set)):
+                return [_to_basic(x) for x in o]
+
+            # numpy arrays / scalars -> python types via tolist()
+            try:
+                if hasattr(o, 'tolist') and not isinstance(o, (str, bytes)):
+                    return _to_basic(o.tolist())
+            except Exception:
+                pass
+
+            if isinstance(o, (str, int, float, bool)) or o is None:
+                return o
+
+            return str(o)
+
+        payloads_clean = _to_basic(payloads)
+
+        if fmt == 'json':
+            with open(path, 'w', encoding='utf-8') as fh:
+                _json.dump(payloads_clean, fh, indent=2)
+            return path
+
+        if fmt == 'pickle':
+            with open(path, 'wb') as fh:
+                _pickle.dump(payloads_clean, fh)
+            return path
+
+        if fmt == 'csv':
+            # Flatten degree_results rows: mode, degree, lower, upper
+            with open(path, 'w', newline='', encoding='utf-8') as fh:
+                writer = _csv.writer(fh)
+                writer.writerow(['mode', 'degree', 'lower', 'upper'])
+                for p in payloads_clean:
+                    mode = p.get('mode')
+                    for entry in p.get('degree_results', []):
+                        writer.writerow([mode, entry.get('degree'), entry.get('lower'), entry.get('upper')])
+            return path
+
+        raise ValueError(f"Unsupported format: {fmt}")
+
+    def plot_bounds(self, results=None, show=True, save_path=None):
+        """Visualize bounds computed by compute_bounds().
+
+        If results is None, uses `self.last_results`.
+        """
+        payloads = results if results is not None else (self.last_results if self.last_results is not None else None)
+        if payloads is None:
+            raise ValueError("No results available to plot. Run compute_bounds() first or pass results explicitly.")
+        viz.plot_bounds(payloads, show=show, save_path=save_path)
 
     def _normalize_poly_degrees(self, recipe: dict):
         degrees = recipe.get("poly_degrees")
@@ -1012,16 +1201,46 @@ class OverlapEstimator:
 
     def _load_eig_results(self, recipe: dict):
         eig_results = recipe.get("eig_results")
+        if eig_results is None:
+            raise ValueError("eig_results must be provided for exact/approx modes.")
         if isinstance(eig_results, str):
             with open(eig_results, "r", encoding="utf-8") as handle:
                 eig_results = json.load(handle)
+        elif isinstance(eig_results, dict):
+            eig_results = copy.copy(eig_results)
+        else:
+            raise ValueError("eig_results must be a path or a dictionary.")
         return eig_results
 
-    def _compute_exact_mode(self, recipe: dict, poly_degrees):
+    def _load_manual_moments(self, recipe: dict):
+        manual_values = recipe.get("moments")
+        if manual_values is not None:
+            return np.array(manual_values, dtype=float)
+        moments_file = recipe.get("moments_file")
+        if moments_file:
+            try:
+                with open(moments_file, "r", encoding="utf-8") as handle:
+                    payload = json.load(handle)
+            except FileNotFoundError as exc:
+                raise FileNotFoundError(f"Moments file not found: {moments_file}") from exc
+            except Exception as exc:
+                raise ValueError(f"Failed to load moments file '{moments_file}': {exc}") from exc
+            if isinstance(payload, dict):
+                manual_values = payload.get("moments")
+            else:
+                manual_values = payload
+            if manual_values is None:
+                raise ValueError(f"Moments file '{moments_file}' does not contain 'moments'.")
+            return np.array(manual_values, dtype=float)
+        if self.moments is not None:
+            return np.array(self.moments, dtype=float)
+        raise ValueError("moments must be provided either directly, via moments_file, or during initialization.")
+
+    def _compute_exact_mode(self, recipe: dict, poly_degrees, visualize:bool=False, **kwargs):
         eig_results = self._load_eig_results(recipe)
         target_indices = recipe["target_indices"]
         b_values = recipe["b_values"]
-        constraint_recipe = PB_linprog_params_from_eig(
+        constraint_info = PB_linprog_params_from_eig(
             eig_results,
             target_indices=target_indices,
             use_exact_energies=True,
@@ -1032,19 +1251,24 @@ class OverlapEstimator:
             Energy_constraint_limits=recipe.get("energy_constraint_limits", (float('-inf'), float('inf')))
         )
         max_degree = poly_degrees[-1]
-        if max_degree > constraint_recipe.max_poly_degree:
+        if max_degree > constraint_info.max_poly_degree:
             raise ValueError("Requested polynomial degree exceeds available moments.")
-        values = constraint_recipe.get_moment_values(max_degree)
-        A_full = constraint_recipe.get_A_ub(max_degree)
-        b_ub = constraint_recipe.get_b_ub(b_values)
-        exact_overlap = constraint_recipe.get_exact_ovlp(b_values)
+        values = constraint_info.get_moment_values(max_degree)
+        A_full = constraint_info.get_A_ub(max_degree)
+        b_ub = constraint_info.get_b_ub(b_values)
+        exact_overlap = constraint_info.get_exact_ovlp(b_values)
         linprog_options = recipe.get("linprog_options", {})
-        poly = PolyBounds_new(values, A_full, b_ub, constraint_recipe.get_constraint_pts(), P_exact=exact_overlap)
+        poly = PolyBounds_new(values, A_full, b_ub, constraint_info.get_constraint_pts(), P_exact=exact_overlap)
         solver_output = poly.optimize(
             poly_degrees=poly_degrees,
             bound=recipe.get("linprog_bound", 1e20),
             method=recipe.get("linprog_method", "highs"),
-            linprog_options=linprog_options
+            linprog_options=linprog_options,
+            visualize=visualize,
+            plot_title = "Exact Mode",
+            save_plots=kwargs.get('save_plots', False),
+            save_dir=kwargs.get('save_dir', None),
+            mode=kwargs.get('mode', None),
         )
         summary = self._format_solver_output(solver_output, poly_degrees)
         return {
@@ -1054,7 +1278,7 @@ class OverlapEstimator:
             "raw_solver_output": solver_output
         }
 
-    def _compute_approx_mode(self, recipe: dict, poly_degrees):
+    def _compute_approx_mode(self, recipe: dict, poly_degrees, visualize:bool=False, **kwargs):
         eig_results = self._load_eig_results(recipe)
         target_indices = recipe["target_indices"]
         b_values = recipe["b_values"]
@@ -1062,59 +1286,52 @@ class OverlapEstimator:
         if bound_extension is None:
             raise ValueError("bound_extension must be provided for approx mode.")
         dense_info = tuple(recipe.get("dense_info", (None, None)))
-        num_x_points = recipe.get("num_x_points")
-        if num_x_points is None:
-            raise ValueError("num_x_points must be provided for approx mode.")
-        constraint_recipe = PB_linprog_params_from_eig(
+        constraint_info = PB_linprog_params_from_eig(
             eig_results,
             target_indices=target_indices,
-            use_exact_energies=False,
+            use_exact_energies=True,
             use_all_evals=recipe.get("use_all_evals", False),
             custom_constraints=recipe.get("custom_constraints"),
             use_cheb=recipe.get("use_cheb", False),
             rescale=recipe.get("rescale", True),
             bound_extension=bound_extension,
             dense_info=dense_info,
-            num_x_points=num_x_points,
             Energy_constraint_limits=recipe.get("energy_constraint_limits", (float('-inf'), float('inf')))
         )
         max_degree = poly_degrees[-1]
-        if max_degree > constraint_recipe.max_poly_degree:
+        if max_degree > constraint_info.max_poly_degree:
             raise ValueError("Requested polynomial degree exceeds available moments.")
-        raw_intervals = constraint_recipe.bound_pairs
-        if constraint_recipe.rescale:
-            intervals = [tuple(constraint_recipe._rescale(np.array(pair))) for pair in raw_intervals]
-        else:
-            intervals = [tuple(pair) for pair in raw_intervals]
-        region_b = np.zeros(len(intervals))
-        for idx, b_val in zip(np.atleast_1d(constraint_recipe.nonzero_b_indices), b_values):
-            region_b[int(idx)] = b_val
-        lower_coefs_list = [[val] for val in region_b]
-        values = constraint_recipe.get_moment_values(max_degree)
-        sip = PolyBounds_SIP(values, poly_degree=max_degree)
+        intervals = constraint_info.get_approx_intervals()
+        region_b_list = np.zeros(len(intervals))
+        for idx, b_val in zip(np.atleast_1d(constraint_info.nonzero_b_indices), b_values):
+            region_b_list[int(idx)] = b_val
+        values = constraint_info.get_moment_values(max_degree)
+        sip = PolyBounds_SIP(values, poly_degree=max_degree, O_exact=constraint_info.get_exact_ovlp(b_values))
         solver_output = sip.optimize(
             intervals,
-            lower_coefs_list,
+            region_b_list,
             solver=recipe.get("solver", "SCS"),
             verbose=recipe.get("verbose", False),
             global_bnd=recipe.get("global_bound"),
             solver_max_iters=recipe.get("solver_max_iters"),
-            poly_degrees=poly_degrees
+            poly_degrees=poly_degrees,
+            visualize=visualize,
+            plot_title = "Approx Mode",
+            save_plots=kwargs.get('save_plots', False),
+            save_dir=kwargs.get('save_dir', None),
+            mode=kwargs.get('mode', None),
         )
         summary = self._format_solver_output(solver_output, poly_degrees)
         return {
             "mode": "approx",
             "degree_results": summary,
             "intervals": intervals,
-            "region_b_values": region_b.tolist(),
+            "region_b_values": region_b_list.tolist(),
             "raw_solver_output": solver_output
         }
 
-    def _compute_manual_mode(self, recipe: dict, poly_degrees):
-        manual_moments = recipe.get("moments", self.moments)
-        if manual_moments is None:
-            raise ValueError("moments must be supplied for manual mode.")
-        manual_moments = np.array(manual_moments)
+    def _compute_manual_mode(self, recipe: dict, poly_degrees, visualize:bool=False, **kwargs):
+        manual_moments = self._load_manual_moments(recipe)
         max_available = len(manual_moments) - 1
         max_degree = poly_degrees[-1]
         if max_degree > max_available:
@@ -1140,7 +1357,12 @@ class OverlapEstimator:
             verbose=recipe.get("verbose", False),
             global_bnd=recipe.get("global_bound"),
             solver_max_iters=recipe.get("solver_max_iters"),
-            poly_degrees=poly_degrees
+            poly_degrees=poly_degrees,
+            visualize=visualize,
+            plot_title = "Manual Mode",
+            save_plots=kwargs.get('save_plots', False),
+            save_dir=kwargs.get('save_dir', None),
+            mode=kwargs.get('mode', None),
         )
         summary = self._format_solver_output(solver_output, poly_degrees)
         return {
@@ -1149,9 +1371,11 @@ class OverlapEstimator:
             "intervals": intervals,
             "raw_solver_output": solver_output
         }
+    
 class MultStateBounds:
     """
     Resolves the bounds for multiple states using an "outer" linear program loop.
+    Junan 20251115: UNFINISHED
     """
     def __init__(self, F, l, u):
         if F.shape[0] != len(l) or F.shape[0] != len(u):
