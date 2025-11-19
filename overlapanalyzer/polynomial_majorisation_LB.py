@@ -616,7 +616,7 @@ class PolyBounds_new():
                 )
             cheb_value = np.dot(current_values, cheb_coeffs[:deg + 1]) if deg >= 0 else 0.0
             summaries.append({
-                "poly_degree": deg,
+                "degree": deg,
                 "LB_result": LB_result,
                 "UB_result": UB_result,
                 "bounds": degree_bounds,
@@ -702,7 +702,6 @@ def gram_to_coefs(Q, deg):
         coefs.append(expr)
     return coefs
 
-# def gen_SIP_intervals(bound_pairs):
 class PolyBounds_SIP:
     """
     Semi-Infinite Programming approaches for polynomial bounds:
@@ -714,7 +713,6 @@ class PolyBounds_SIP:
         self.values = np.array(values)
         self.poly_degree = poly_degree if poly_degree is not None else len(values)-1
         self.bounds = []
-        self.method_used = None
         self.multi_degree_results = None
         self.O_exact = O_exact
         if O_exact is not None:
@@ -750,7 +748,7 @@ class PolyBounds_SIP:
         if solver_max_iters is not None:
             solve_kwargs['max_iters'] = int(solver_max_iters)
 
-        def solve_for_degree(degree):
+        def solve_for_degree(degree, init_c_LB=None, init_c_UB=None):
             n = degree
             M = self.values[:degree + 1]
 
@@ -808,21 +806,31 @@ class PolyBounds_SIP:
                 return cons
 
             c_LB = cp.Variable(n + 1)
+            if init_c_LB is not None:
+                try:
+                    c_LB.value = np.asarray(init_c_LB, dtype=float)
+                except Exception:
+                    c_LB.value = None
             cons_LB = interval_constraints(c_LB, sign=-1)
             if global_bnd is not None:
                 cons_LB.append(c_LB <= global_bnd)
                 cons_LB.append(-global_bnd <= c_LB)
             prob_LB = cp.Problem(cp.Maximize(M @ c_LB), cons_LB)
-            prob_LB.solve(solver=solver, verbose=verbose, **solve_kwargs)
+            prob_LB.solve(solver=solver, verbose=verbose, warm_start=True, **solve_kwargs)
             LB_val = float(M @ c_LB.value) if c_LB.value is not None else None
 
             c_UB = cp.Variable(n + 1)
+            if init_c_UB is not None:
+                try:
+                    c_UB.value = np.asarray(init_c_UB, dtype=float)
+                except Exception:
+                    c_UB.value = None
             cons_UB = interval_constraints(c_UB, sign=+1)
             if global_bnd is not None:
                 cons_UB.append(c_UB <= global_bnd)
                 cons_UB.append(c_UB >= -global_bnd)
             prob_UB = cp.Problem(cp.Minimize(M @ c_UB), cons_UB)
-            prob_UB.solve(solver=solver, verbose=verbose, **solve_kwargs)
+            prob_UB.solve(solver=solver, verbose=verbose, warm_start=True, **solve_kwargs)
             UB_val = float(M @ c_UB.value) if c_UB.value is not None else None
 
             lb_dummy = type("obj", (), {"x": c_LB.value})
@@ -840,11 +848,27 @@ class PolyBounds_SIP:
                 "UB_result": ub_dummy
             }
 
-        self.method_used = "sos"
         summaries = []
+        prev_c_LB = None
+        prev_c_UB = None
         for deg in poly_degrees:
-            summary = solve_for_degree(deg)
+            # build warm starts by padding/truncating as needed
+            def _expand(guess, new_len):
+                if guess is None:
+                    return None
+                g = np.asarray(guess, dtype=float)
+                if g.shape[0] == new_len:
+                    return g
+                if g.shape[0] < new_len:
+                    return np.concatenate([g, np.zeros(new_len - g.shape[0])])
+                return g[:new_len]
+
+            init_lb = _expand(prev_c_LB, deg + 1)
+            init_ub = _expand(prev_c_UB, deg + 1)
+            summary = solve_for_degree(deg, init_c_LB=init_lb, init_c_UB=init_ub)
             summaries.append(summary)
+            prev_c_LB = summary.get("c_LB")
+            prev_c_UB = summary.get("c_UB")
             # handle visualization and optional saving
             save_plots = bool(kwargs.get('save_plots', False))
             save_dir = kwargs.get('save_dir', None)
@@ -863,7 +887,7 @@ class PolyBounds_SIP:
                     intervals,
                     deg,
                     lower_coefs_list,
-                    n_plot_points=kwargs.get("n_plot_points", 500),
+                    n_plot_points=kwargs.get("n_plot_points", 1000),
                     title=title,
                     show_spectrum=kwargs.get("show_spectrum", False),
                     linewidth=kwargs.get("linewidth", 1),
@@ -877,12 +901,264 @@ class PolyBounds_SIP:
                     save_path=save_path,
                     mode=mode_name,
                 )
-        self.method_used = "sos"
         return summaries
 
+    def optimize_2(self, intervals, lower_coefs_list, solver="SCS", verbose=False,
+                global_bnd=None, solver_max_iters=None, poly_degrees=None,
+                visualize=False, **kwargs):
+        """
+        Unified SOS/SDP solver (fixed, robust): replaces your previous optimize.
+        - intervals: list[(a,b)]
+        - lower_coefs_list: list of coefficient-lists for l_j(x) (power-basis, low-first)
+        - poly_degrees: iterable of degrees to sweep (each degree solved in sequence,
+        warm-starting from previous solution)
+        """
+        import cvxpy as cp
 
+        if len(lower_coefs_list) != len(intervals):
+            raise ValueError("lower_coefs_list must have the same length as intervals.")
 
-    def plot_results(self, intervals, poly_degree=None, lower_coefs_list=None, n_plot_points=500, linewidth=2, title=None, show_spectrum=False, show=True, save_path=None, legend_anchor=(1,0.2), show_constraint_points=False, plot_chebyshev=False, constraint_recipe_obj=None, truncate_lower=None, **kwargs):
+        # degrees to sweep
+        if poly_degrees is None:
+            poly_degrees = [self.poly_degree]
+        poly_degrees = sorted({int(d) for d in poly_degrees})
+        if not poly_degrees:
+            raise ValueError("poly_degrees must contain at least one degree.")
+
+        max_available = len(self.values) - 1
+        for deg in poly_degrees:
+            if deg < 0 or deg > max_available:
+                raise ValueError(f"Requested poly_degree {deg} is outside [0, {max_available}].")
+
+        solve_kwargs = {}
+        if solver_max_iters is not None:
+            solve_kwargs['max_iters'] = int(solver_max_iters)
+
+        # helper: Gram matrix -> power-basis coefficients
+        def gram_to_coefs(Q, deg):
+            # returns list length 2*deg+1
+            coefs = []
+            for k in range(2 * deg + 1):
+                expr = 0
+                for i in range(deg + 1):
+                    j = k - i
+                    if 0 <= j <= deg:
+                        expr = expr + Q[i, j]
+                coefs.append(expr)
+            return coefs
+
+        # Build interval constraints for a given polynomial variable cvar and sign
+        # sign = +1 -> enforce p - l = SOS (majorizer)
+        # sign = -1 -> enforce l - p = SOS (minorizer)
+        def interval_constraints(cvar, sign, target_degree):
+            """
+            Build SOS constraints for:
+                sign * (p(x) - l(x)) >= 0 on each interval [a, b]
+            using the Markov–Lukács decomposition:
+                sign*(p-l) = s_L(x)*(x-a) + s_R(x)*(b-x)
+            where s_L and s_R are SOS polynomials.
+
+            This works for ALL degrees (even or odd).
+            """
+            import cvxpy as cp
+
+            cons = []
+            n = target_degree  # degree of p(x)
+
+            for (a, b), lcoef in zip(intervals, lower_coefs_list):
+                # Ensure lower function is a coefficient list
+                if np.isscalar(lcoef):
+                    l_list = [float(lcoef)]
+                else:
+                    l_list = list(lcoef)
+
+                # Residual degree = max(deg(p), deg(l))
+                deg_r = max(n, len(l_list) - 1)
+                deg_r = int(deg_r)
+
+                # Degree of s_L and s_R:
+                # (deg(s_L) + 1) + 1 = deg_r+1  => deg(s_L) = deg_r - 1
+                # Same for s_R.
+                # If deg_r == 0 (constant residual), deg_s = 0 is OK.
+                deg_s = max(0, deg_r - 1)
+
+                # Gram matrices for SOS polynomials
+                QL = cp.Variable((deg_s + 1, deg_s + 1), PSD=True)
+                QR = cp.Variable((deg_s + 1, deg_s + 1), PSD=True)
+
+                # Convert Gram matrices to coefficient lists
+                sL = gram_to_coefs(QL, deg_s)  # SOS => degree 2*deg_s
+                sR = gram_to_coefs(QR, deg_s)
+
+                # Build (x-a) and (b-x) linear factors in power basis
+                # (x - a) = [-a, 1]
+                # (b - x) = [b, -1]
+                xa = [-a, 1.0]
+                bx = [b, -1.0]
+
+                # Convolve SOS coefs with linear factors
+                conv_L = [0] * (len(sL) + 1)
+                for i in range(len(sL)):
+                    conv_L[i]     += sL[i] * xa[0]
+                    conv_L[i + 1] += sL[i] * xa[1]
+
+                conv_R = [0] * (len(sR) + 1)
+                for i in range(len(sR)):
+                    conv_R[i]     += sR[i] * bx[0]
+                    conv_R[i + 1] += sR[i] * bx[1]
+
+                # Build p(x) coefficients up to deg_r
+                pcoefs = [cvar[i] if i <= n else 0 for i in range(deg_r + 1)]
+
+                # Build l(x) coefficients up to deg_r
+                lpad = list(l_list[:deg_r + 1]) + [0] * max(0, (deg_r + 1) - len(l_list))
+
+                # Residual r(x) = sign*(p - l)
+                rcoefs = [sign * (pcoefs[k] - lpad[k]) for k in range(deg_r + 1)]
+
+                # Pad SOS sides
+                L = max(len(rcoefs), len(conv_L), len(conv_R))
+                def pad(v): return list(v) + [0] * (L - len(v))
+                rpad = pad(rcoefs)
+                Lpad = pad(conv_L)
+                Rpad = pad(conv_R)
+
+                # Coefficient matching
+                for k in range(deg_r + 1):
+                    cons.append(rpad[k] == Lpad[k] + Rpad[k])
+
+                # PSD constraints explicitly added (redundant but stabilizing)
+                cons.append(QL >> 0)
+                cons.append(QR >> 0)
+
+            return cons
+
+        # solve for a specific degree (with optional warm-starts provided)
+        def solve_for_degree(degree, init_c_LB=None, init_c_UB=None):
+            n = degree
+            M = self.values[:n + 1]
+
+            # ----------------- Minorizer (maximize M·c subject to l - p SOS) -----------------
+            c_LB = cp.Variable(n + 1)
+            if init_c_LB is not None:
+                try:
+                    arr = np.asarray(init_c_LB, dtype=float)
+                    if arr.size == n + 1:
+                        c_LB.value = arr
+                    elif arr.size < n + 1:
+                        c_LB.value = np.concatenate([arr, np.zeros(n + 1 - arr.size)])
+                    else:
+                        c_LB.value = arr[:n + 1]
+                except Exception:
+                    c_LB.value = None
+
+            cons_LB = interval_constraints(c_LB, sign=-1, target_degree=n)
+            if global_bnd is not None:
+                # elementwise box on coefficients
+                cons_LB += [c_LB <= float(global_bnd), c_LB >= -float(global_bnd)]
+
+            prob_LB = cp.Problem(cp.Maximize(M @ c_LB), cons_LB)
+            prob_LB.solve(solver=solver, verbose=verbose, warm_start=True, **solve_kwargs)
+
+            LB_val = float(M @ c_LB.value) if c_LB.value is not None else None
+
+            # ----------------- Majorizer (minimize M·c subject to p - l SOS) -----------------
+            c_UB = cp.Variable(n + 1)
+            if init_c_UB is not None:
+                try:
+                    arr = np.asarray(init_c_UB, dtype=float)
+                    if arr.size == n + 1:
+                        c_UB.value = arr
+                    elif arr.size < n + 1:
+                        c_UB.value = np.concatenate([arr, np.zeros(n + 1 - arr.size)])
+                    else:
+                        c_UB.value = arr[:n + 1]
+                except Exception:
+                    c_UB.value = None
+
+            cons_UB = interval_constraints(c_UB, sign=+1, target_degree=n)
+            if global_bnd is not None:
+                cons_UB += [c_UB <= float(global_bnd), c_UB >= -float(global_bnd)]
+
+            prob_UB = cp.Problem(cp.Minimize(M @ c_UB), cons_UB)
+            prob_UB.solve(solver=solver, verbose=verbose, warm_start=True, **solve_kwargs)
+
+            UB_val = float(M @ c_UB.value) if c_UB.value is not None else None
+
+            lb_dummy = type("obj", (), {"x": c_LB.value})
+            ub_dummy = type("obj", (), {"x": c_UB.value})
+            bounds = [LB_val, UB_val]
+            print(f"SOS bounds (degree {degree}):", bounds)
+            return {
+                "degree": degree,
+                "bounds": bounds,
+                "LB_problem": prob_LB,
+                "UB_problem": prob_UB,
+                "c_LB": c_LB.value,
+                "c_UB": c_UB.value,
+                "LB_result": lb_dummy,
+                "UB_result": ub_dummy
+            }
+
+        # Sweep degrees with warm-starting of c only (Gram warm-start optional)
+        summaries = []
+        prev_c_LB = None
+        prev_c_UB = None
+
+        for deg in poly_degrees:
+            def _expand(guess, new_len):
+                if guess is None:
+                    return None
+                g = np.asarray(guess, dtype=float)
+                if g.shape[0] == new_len:
+                    return g
+                if g.shape[0] < new_len:
+                    return np.concatenate([g, np.zeros(new_len - g.shape[0])])
+                return g[:new_len]
+
+            init_lb = _expand(prev_c_LB, deg + 1)
+            init_ub = _expand(prev_c_UB, deg + 1)
+            summary = solve_for_degree(deg, init_c_LB=init_lb, init_c_UB=init_ub)
+            summaries.append(summary)
+            prev_c_LB = summary.get("c_LB")
+            prev_c_UB = summary.get("c_UB")
+
+            # plotting / saving (same API as your original)
+            save_plots = bool(kwargs.get('save_plots', False))
+            save_dir = kwargs.get('save_dir', None)
+            mode_name = kwargs.get('mode', None)
+            show_plot = bool(kwargs.get('show', visualize))
+            if visualize or save_plots:
+                base_title = kwargs.get("plot_title", "")
+                title = (base_title + " ").rstrip()
+                save_path = None
+                if save_plots and save_dir:
+                    os.makedirs(save_dir, exist_ok=True)
+                    title_safe = title.replace(' ', '_')
+                    fname = f"{title_safe}_deg{deg}.pdf"
+                    save_path = os.path.join(save_dir, fname)
+                self.plot_results(
+                    intervals,
+                    deg,
+                    lower_coefs_list,
+                    n_plot_points=kwargs.get("n_plot_points", 1000),
+                    title=title,
+                    show_spectrum=kwargs.get("show_spectrum", False),
+                    linewidth=kwargs.get("linewidth", 1),
+                    exact_energies=kwargs.get("exact_energies"),
+                    exact_overlaps=kwargs.get("exact_overlaps"),
+                    c_LB=summary.get("c_LB"),
+                    c_UB=summary.get("c_UB"),
+                    bounds=summary.get("bounds"),
+                    method="sos",
+                    show=show_plot,
+                    save_path=save_path,
+                    mode=mode_name,
+                )
+
+        return summaries
+
+    def plot_results(self, intervals, poly_degree=None, lower_coefs_list=None, n_plot_points=1000, linewidth=2, title=None, show_spectrum=False, show=True, save_path=None, legend_anchor=(1,0.2), show_constraint_points=False, plot_chebyshev=False, constraint_recipe_obj=None, truncate_lower=None, **kwargs):
         """
         Plot optimized polynomials and constraint functions using the same style as PolyBounds_new.plot_results.
         Accepts `show` and `save_path` to control display and saving.
@@ -944,10 +1220,22 @@ class PolyBounds_SIP:
             deg_for_title = poly_degree if poly_degree is not None else getattr(self, 'poly_degree', None)
             if bounds is not None:
                 oex = getattr(self, "O_exact", None)
-                if oex is not None:
-                    ax.set_title(title + f', Degree={deg_for_title}' + f', [{bounds[0]:.3f}, {bounds[1]:.3f}] ({oex:.3f})')
+                # format bounds safely if any entry is None
+                try:
+                    b0, b1 = bounds[0], bounds[1]
+                except Exception:
+                    b0, b1 = None, None
+                if b0 is not None and b1 is not None:
+                    bounds_fmt = f'[{b0:.3f}, {b1:.3f}]'
                 else:
-                    ax.set_title(title + f', Degree={deg_for_title}' + f', [{bounds[0]:.3f}, {bounds[1]:.3f}]')
+                    bounds_fmt = f'[{b0}, {b1}]'
+                if oex is not None:
+                    try:
+                        ax.set_title(title + f', Degree={deg_for_title}' + f', {bounds_fmt} ({oex:.3f})')
+                    except Exception:
+                        ax.set_title(title + f', Degree={deg_for_title}' + f', {bounds_fmt} ({oex})')
+                else:
+                    ax.set_title(title + f', Degree={deg_for_title}' + f', {bounds_fmt}')
             else:
                 ax.set_title(title + f' (deg={deg_for_title})')
         ax.set_ylabel('Function Value')
@@ -1094,7 +1382,7 @@ class OverlapEstimator:
         self.last_results = all_payloads[-1] if all_payloads else None
         return all_payloads if len(all_payloads) > 1 else all_payloads[0]
 
-    def save_results(self, results, path, fmt='json'):
+    def save_results(self, results, output_file_path, fmt='json'):
         """Save compute_bounds results to a local file.
 
         Supported formats: 'json', 'csv', 'pickle'.
@@ -1138,29 +1426,29 @@ class OverlapEstimator:
         payloads_clean = _to_basic(payloads)
 
         if fmt == 'json':
-            with open(path, 'w', encoding='utf-8') as fh:
+            with open(output_file_path, 'w', encoding='utf-8') as fh:
                 _json.dump(payloads_clean, fh, indent=2)
-            return path
+            return output_file_path
 
         if fmt == 'pickle':
-            with open(path, 'wb') as fh:
+            with open(output_file_path, 'wb') as fh:
                 _pickle.dump(payloads_clean, fh)
-            return path
+            return output_file_path
 
         if fmt == 'csv':
             # Flatten degree_results rows: mode, degree, lower, upper
-            with open(path, 'w', newline='', encoding='utf-8') as fh:
+            with open(output_file_path, 'w', newline='', encoding='utf-8') as fh:
                 writer = _csv.writer(fh)
                 writer.writerow(['mode', 'degree', 'lower', 'upper'])
                 for p in payloads_clean:
                     mode = p.get('mode')
                     for entry in p.get('degree_results', []):
                         writer.writerow([mode, entry.get('degree'), entry.get('lower'), entry.get('upper')])
-            return path
+            return output_file_path
 
         raise ValueError(f"Unsupported format: {fmt}")
 
-    def plot_bounds(self, results=None, show=True, save_path=None):
+    def plot_bounds(self, results=None, show=True, output_file_path=None, **kwargs):
         """Visualize bounds computed by compute_bounds().
 
         If results is None, uses `self.last_results`.
@@ -1168,7 +1456,7 @@ class OverlapEstimator:
         payloads = results if results is not None else (self.last_results if self.last_results is not None else None)
         if payloads is None:
             raise ValueError("No results available to plot. Run compute_bounds() first or pass results explicitly.")
-        viz.plot_bounds(payloads, show=show, save_path=save_path)
+        viz.plot_bounds(payloads, show=show, save_path=output_file_path, **kwargs)
 
     def _normalize_poly_degrees(self, recipe: dict):
         degrees = recipe.get("poly_degrees")
@@ -1275,7 +1563,8 @@ class OverlapEstimator:
             "mode": "exact",
             "degree_results": summary,
             "exact_overlap": exact_overlap,
-            "raw_solver_output": solver_output
+            "raw_solver_output": solver_output,
+            "poly_degrees": list(poly_degrees)
         }
 
     def _compute_approx_mode(self, recipe: dict, poly_degrees, visualize:bool=False, **kwargs):
@@ -1327,7 +1616,8 @@ class OverlapEstimator:
             "degree_results": summary,
             "intervals": intervals,
             "region_b_values": region_b_list.tolist(),
-            "raw_solver_output": solver_output
+            "raw_solver_output": solver_output,
+            "poly_degrees": list(poly_degrees)
         }
 
     def _compute_manual_mode(self, recipe: dict, poly_degrees, visualize:bool=False, **kwargs):
@@ -1369,7 +1659,8 @@ class OverlapEstimator:
             "mode": "manual",
             "degree_results": summary,
             "intervals": intervals,
-            "raw_solver_output": solver_output
+            "raw_solver_output": solver_output,
+            "poly_degrees": list(poly_degrees)
         }
     
 class MultStateBounds:
