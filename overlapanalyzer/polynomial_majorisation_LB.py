@@ -691,13 +691,13 @@ class PolyBounds_new():
         plt.close(fig)
 
 # helper: turn Gram matrix into coefficients of v^T Q v
-def gram_to_coefs(Q, deg):
+def gram_to_coefs(Q, dim):
     coefs = []
-    for k in range(2*deg+1):
+    for k in range(2*dim-1):
         expr = 0
-        for i in range(deg+1):
+        for i in range(dim-1):
             j = k-i
-            if 0 <= j <= deg:
+            if 0 <= j < dim:
                 expr += Q[i,j]
         coefs.append(expr)
     return coefs
@@ -749,63 +749,60 @@ class PolyBounds_SIP:
             solve_kwargs['max_iters'] = int(solver_max_iters)
 
         def solve_for_degree(degree, init_c_LB=None, init_c_UB=None):
-            n = degree
             M = self.values[:degree + 1]
 
             def interval_constraints(cvar, sign):
+                def pad(lst, max_L):
+                    return list(lst) + [0] * (max_L - len(lst))
                 cons = []
-                for (a, b), lcoef in zip(intervals, lower_coefs_list):
-                    deg_r = int(max(0, n))
+                for (l, r), lcoef in zip(intervals, lower_coefs_list):
+                    deg_r = int(max(1, degree))
                     if deg_r % 2 == 0:
-                        d0 = deg_r // 2
-                        d1 = max(0, (deg_r - 2) // 2)
-                        Q0 = cp.Variable((d0 + 1, d0 + 1), PSD=True)
-                        Q1 = cp.Variable((d1 + 1, d1 + 1), PSD=True)
-                        s0 = gram_to_coefs(Q0, d0)
-                        s1 = gram_to_coefs(Q1, d1)
-                        quad = [-a * b, (a + b), -1.0]
-                        conv = [0] * (len(s1) + len(quad) - 1)
-                        for i in range(len(s1)):
-                            for j in range(len(quad)):
-                                conv[i + j] += s1[i] * quad[j]
-                        cp_poly = [cvar[i] if i <= n else 0 for i in range(deg_r + 1)]
-                        lp = [lcoef] + [0] * deg_r
-                        rcoefs = [sign * (cp_poly[k] - lp[k]) for k in range(deg_r + 1)]
-                        L = max(len(rcoefs), len(s0), len(conv))
-                        def pad(lst):
-                            return list(lst) + [0] * (L - len(lst))
-                        s0p, convp, rpad = pad(s0), pad(conv), pad(rcoefs)
-                        for k in range(deg_r + 1):
-                            cons.append(rpad[k] == s0p[k] + convp[k])
-                        cons += [Q0 >> 0, Q1 >> 0]
-                    else:
-                        d_sa = (deg_r - 1) // 2
-                        d_sb = (deg_r - 1) // 2
-                        Qa = cp.Variable((d_sa + 1, d_sa + 1), PSD=True)
-                        Qb = cp.Variable((d_sb + 1, d_sb + 1), PSD=True)
+                        d_sa = deg_r // 2 + 1
+                        d_sb = d_sa - 1
+                        Qa = cp.Variable((d_sa, d_sa), PSD=True) # a(x)
+                        Qb = cp.Variable((d_sb, d_sb), PSD=True) # b(x)
                         sa = gram_to_coefs(Qa, d_sa)
                         sb = gram_to_coefs(Qb, d_sb)
-                        term_a = [0] * (len(sa) + 1)
-                        for i in range(len(sa)):
-                            term_a[i] += -a * sa[i]
-                            term_a[i + 1] += sa[i]
-                        term_b = [0] * (len(sb) + 1)
+                        quad = [-l * r, (l + r), -1.0]
+                        conv = [0] * (deg_r + 1)
                         for i in range(len(sb)):
-                            term_b[i] += b * sb[i]
-                            term_b[i + 1] -= sb[i]
-                        cp_poly = [cvar[i] if i <= n else 0 for i in range(deg_r + 1)]
-                        lp = [lcoef] + [0] * deg_r
+                            for j in range(len(quad)):
+                                conv[i + j] += sb[i] * quad[j] # Multiply b(x) by ( -l r + (l + r) x - x^2 )
+                        cp_poly = [cvar[i] if i <= degree else 0 for i in range(deg_r + 1)]
+                        lp = pad([lcoef], deg_r + 1)
                         rcoefs = [sign * (cp_poly[k] - lp[k]) for k in range(deg_r + 1)]
-                        L = max(len(rcoefs), len(term_a), len(term_b))
-                        def pad(lst):
-                            return list(lst) + [0] * (L - len(lst))
-                        term_ap, term_bp, rpad = pad(term_a), pad(term_b), pad(rcoefs)
+                        L = max(len(rcoefs), len(sa), len(conv))
+                        cons_a, cons_b, cons_f = pad(sa, L), pad(conv, L), pad(rcoefs, L)
                         for k in range(deg_r + 1):
-                            cons.append(rpad[k] == term_ap[k] + term_bp[k])
+                            cons.append(cons_f[k] == cons_a[k] + cons_b[k])
                         cons += [Qa >> 0, Qb >> 0]
+                    else:
+                        d_sc = (deg_r + 1) // 2
+                        d_sd = (deg_r + 1) // 2
+                        Qc = cp.Variable((d_sc, d_sc), PSD=True)
+                        Qd = cp.Variable((d_sd, d_sd), PSD=True)
+                        sc = gram_to_coefs(Qc, d_sc)
+                        sd = gram_to_coefs(Qd, d_sd)
+                        term_c = pad([0], len(sc) + 1)
+                        for i in range(len(sc)):
+                            term_c[i] += -l * sc[i] # Multiply by ( -l )
+                            term_c[i + 1] += sc[i] # Multiply by ( x )
+                        term_d = pad([0], len(sd) + 1)
+                        for i in range(len(sd)):
+                            term_d[i] += r * sd[i] # Multiply by ( r )
+                            term_d[i + 1] -= sd[i] # Multiply by ( -x )
+                        cp_poly = [cvar[i] if i <= degree else 0 for i in range(deg_r + 1)]
+                        lp = pad([lcoef], deg_r + 1)
+                        rcoefs = [sign * (cp_poly[k] - lp[k]) for k in range(deg_r + 1)]
+                        L = max(len(rcoefs), len(term_c), len(term_d))
+                        cons_c, cons_d, cons_f = pad(term_c, L), pad(term_d, L), pad(rcoefs, L)
+                        for k in range(deg_r + 1):
+                            cons.append(cons_f[k] == cons_c[k] + cons_d[k])
+                        cons += [Qc >> 0, Qd >> 0]
                 return cons
 
-            c_LB = cp.Variable(n + 1)
+            c_LB = cp.Variable(degree + 1)
             if init_c_LB is not None:
                 try:
                     c_LB.value = np.asarray(init_c_LB, dtype=float)
@@ -819,7 +816,7 @@ class PolyBounds_SIP:
             prob_LB.solve(solver=solver, verbose=verbose, warm_start=True, **solve_kwargs)
             LB_val = float(M @ c_LB.value) if c_LB.value is not None else None
 
-            c_UB = cp.Variable(n + 1)
+            c_UB = cp.Variable(degree + 1)
             if init_c_UB is not None:
                 try:
                     c_UB.value = np.asarray(init_c_UB, dtype=float)
