@@ -719,9 +719,9 @@ class PolyBounds_SIP:
         if O_exact is not None:
             print("Exact overlap:", O_exact)
 
-    def optimize(self, intervals, lower_coefs_list, solver="SCS", verbose=False, global_bnd=None, solver_max_iters=None, poly_degrees=None, visualize=False, **kwargs):
+    def optimize(self, intervals, lower_coefs_list, solver="SCS", verbose=False, global_bnd=None, solver_max_iters=None, poly_degrees=None, visualize=False, use_chebyshev=True, **kwargs):
         """
-        SOS/SDP (power basis) for piecewise polynomial constraints on intervals.
+        SOS/SDP (power basis or Chebyshev basis) for piecewise polynomial constraints on intervals.
         Two SDPs:
         1) Minorizer p_l:  l_j(x) - p_l(x) is SOS on I_j, maximize M·c
         2) Majorizer p_u:  p_u(x) - l_j(x) is SOS on I_j, minimize M·c
@@ -730,6 +730,7 @@ class PolyBounds_SIP:
         lower_coefs_list: list of lists/arrays; coefficients of l_j(x) in power basis (lowest degree first)
         solver: CVXPY solver name (default "SCS")
         solver_max_iters: optional int, forwarded to cp.Problem.solve(...) as max_iters when provided
+        use_chebyshev: bool, if True, use Chebyshev basis for optimization variables (default True)
         """
         if len(lower_coefs_list) != len(intervals):
             raise ValueError("lower_coefs_list must have the same length as intervals.")
@@ -745,8 +746,17 @@ class PolyBounds_SIP:
                 raise ValueError(f"Requested poly_degree {deg} is outside [0, {max_available}].")
 
         solve_kwargs = {}
+        # Increase default max iterations for MOSEK if not specified
+        if solver == "MOSEK" and solver_max_iters is None:
+            solver_max_iters = 10000
+
         if solver_max_iters is not None:
-            solve_kwargs['max_iters'] = int(solver_max_iters)
+            if solver == "MOSEK":
+                solve_kwargs["mosek_params"] = {
+                    "MSK_IPAR_INTPNT_MAX_ITERATIONS": int(solver_max_iters)
+                }
+            else:
+                solve_kwargs['max_iters'] = int(solver_max_iters)
 
         def pad(lst, max_L):
             return list(lst) + [0] * (max_L - len(lst))
@@ -762,9 +772,17 @@ class PolyBounds_SIP:
             return g[:new_len]
         
         def solve_for_degree(degree, init_c_LB=None, init_c_UB=None):
-            M = self.values[:degree + 1]
+            if use_chebyshev:
+                M_trans = chebyshev_matrix_from_degree(degree)
+                M = M_trans @ self.values[:degree + 1]
+            else:
+                M = self.values[:degree + 1]
+
             def interval_constraints(cvar, sign):
                 cons = []
+                if use_chebyshev:
+                    c_power_expr = M_trans.T @ cvar
+
                 for (l, r), lcoef in zip(intervals, lower_coefs_list):
                     deg_r = int(max(1, degree))
                     if deg_r % 2 == 0:
@@ -779,14 +797,19 @@ class PolyBounds_SIP:
                         for i in range(len(sb)):
                             for j in range(len(quad)):
                                 conv[i + j] += sb[i] * quad[j] # Multiply b(x) by ( -l r + (l + r) x - x^2 )
-                        cp_poly = [cvar[i] if i <= degree else 0 for i in range(deg_r + 1)]
+                        
+                        if use_chebyshev:
+                            cp_poly = [c_power_expr[i] if i <= degree else 0 for i in range(deg_r + 1)]
+                        else:
+                            cp_poly = [cvar[i] if i <= degree else 0 for i in range(deg_r + 1)]
+                        
                         lp = pad([lcoef], deg_r + 1)
                         rcoefs = [sign * (cp_poly[k] - lp[k]) for k in range(deg_r + 1)]
                         L = max(len(rcoefs), len(sa), len(conv))
                         cons_a, cons_b, cons_f = pad(sa, L), pad(conv, L), pad(rcoefs, L)
                         for k in range(deg_r + 1):
                             cons.append(cons_f[k] == cons_a[k] + cons_b[k])
-                        cons += [Qa >> 0, Qb >> 0]
+                        cons.extend([Qa >> 0, Qb >> 0])
                     else:
                         d_sc = (deg_r + 1) // 2
                         d_sd = (deg_r + 1) // 2
@@ -802,14 +825,19 @@ class PolyBounds_SIP:
                         for i in range(len(sd)):
                             term_d[i] += r * sd[i] # Multiply by ( r )
                             term_d[i + 1] -= sd[i] # Multiply by ( -x )
-                        cp_poly = [cvar[i] if i <= degree else 0 for i in range(deg_r + 1)]
+                        
+                        if use_chebyshev:
+                            cp_poly = [c_power_expr[i] if i <= degree else 0 for i in range(deg_r + 1)]
+                        else:
+                            cp_poly = [cvar[i] if i <= degree else 0 for i in range(deg_r + 1)]
+                        
                         lp = pad([lcoef], deg_r + 1)
                         rcoefs = [sign * (cp_poly[k] - lp[k]) for k in range(deg_r + 1)]
                         L = max(len(rcoefs), len(term_c), len(term_d))
                         cons_c, cons_d, cons_f = pad(term_c, L), pad(term_d, L), pad(rcoefs, L)
                         for k in range(deg_r + 1):
                             cons.append(cons_f[k] == cons_c[k] + cons_d[k])
-                        cons += [Qc >> 0, Qd >> 0]
+                        cons.extend([Qc >> 0, Qd >> 0])
                 return cons
 
             c_LB = cp.Variable(degree + 1)
@@ -852,7 +880,8 @@ class PolyBounds_SIP:
                 "c_LB": c_LB.value,
                 "c_UB": c_UB.value,
                 "LB_result": lb_dummy,
-                "UB_result": ub_dummy
+                "UB_result": ub_dummy,
+                "basis": "chebyshev" if use_chebyshev else "power"
             }
 
         summaries = []
@@ -880,6 +909,17 @@ class PolyBounds_SIP:
                     title_safe = title.replace(' ', '_')
                     fname = f"{title_safe}_deg{deg}.pdf"
                     save_path = os.path.join(save_dir, fname)
+                
+                # Prepare coefficients for plotting (must be power basis)
+                c_LB_plot = summary.get("c_LB")
+                c_UB_plot = summary.get("c_UB")
+                if use_chebyshev:
+                    M_trans = chebyshev_matrix_from_degree(deg)
+                    if c_LB_plot is not None:
+                        c_LB_plot = M_trans.T @ c_LB_plot
+                    if c_UB_plot is not None:
+                        c_UB_plot = M_trans.T @ c_UB_plot
+
                 self.plot_results(
                     intervals,
                     deg,
@@ -890,8 +930,8 @@ class PolyBounds_SIP:
                     linewidth=kwargs.get("linewidth", 1),
                     exact_energies=kwargs.get("exact_energies"),
                     exact_overlaps=kwargs.get("exact_overlaps"),
-                    c_LB=summary.get("c_LB"),
-                    c_UB=summary.get("c_UB"),
+                    c_LB=c_LB_plot,
+                    c_UB=c_UB_plot,
                     bounds=summary.get("bounds"),
                     method="sos",
                     show=show_plot,
