@@ -3,6 +3,7 @@ import numpy as np
 import scipy as sp
 import copy
 import pandas as pd
+import cvxpy as cp
 from numpy.polynomial import chebyshev
 from numpy.polynomial import Polynomial
 from scipy.optimize import minimize, NonlinearConstraint, linprog
@@ -730,7 +731,6 @@ class PolyBounds_SIP:
         solver: CVXPY solver name (default "SCS")
         solver_max_iters: optional int, forwarded to cp.Problem.solve(...) as max_iters when provided
         """
-        import cvxpy as cp
         if len(lower_coefs_list) != len(intervals):
             raise ValueError("lower_coefs_list must have the same length as intervals.")
         if poly_degrees is None:
@@ -786,7 +786,7 @@ class PolyBounds_SIP:
                         cons_a, cons_b, cons_f = pad(sa, L), pad(conv, L), pad(rcoefs, L)
                         for k in range(deg_r + 1):
                             cons.append(cons_f[k] == cons_a[k] + cons_b[k])
-                        # cons += [Qa >> 0, Qb >> 0]
+                        cons += [Qa >> 0, Qb >> 0]
                     else:
                         d_sc = (deg_r + 1) // 2
                         d_sd = (deg_r + 1) // 2
@@ -809,7 +809,7 @@ class PolyBounds_SIP:
                         cons_c, cons_d, cons_f = pad(term_c, L), pad(term_d, L), pad(rcoefs, L)
                         for k in range(deg_r + 1):
                             cons.append(cons_f[k] == cons_c[k] + cons_d[k])
-                        # cons += [Qc >> 0, Qd >> 0]
+                        cons += [Qc >> 0, Qd >> 0]
                 return cons
 
             c_LB = cp.Variable(degree + 1)
