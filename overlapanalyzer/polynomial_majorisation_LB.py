@@ -248,14 +248,14 @@ def process_bound_pairs(bound_pairs, target_indices, dense_info=(None, None)):
         raise ValueError("dense_info[0] cannot be used since 0 is in target_indices.")
     nonzero_b_indices = target_indices.copy() if dense_info[0] is None else np.array(target_indices)+1
     def _insert_lower_bound(pair_list, bound):
-        pair_list.insert(1,(bound, pair_list[0][1]))
+        pair_list.insert(1, [bound, pair_list[0][1]])
         pair_list[0] = (pair_list[0][0], bound)
     def _insert_upper_bound(pair_list, bound):
-        pair_list.insert(-1, (pair_list[-1][0], bound))
+        pair_list.insert(-1, [pair_list[-1][0], bound])
         pair_list[-1] = (bound, pair_list[-1][1])
         
     boundaries = compute_boundaries(target_indices, len(bound_pairs))
-    new_bound_pairs = [(bound_pairs[lower][0], bound_pairs[upper][1]) for lower, upper in boundaries]
+    new_bound_pairs = [[bound_pairs[lower][0], bound_pairs[upper][1]] for lower, upper in boundaries]
     incl_endpoints = [True for _ in range(len(new_bound_pairs))]
     # The following lines define what "correct locations" mean for the dense region
     if dense_info[0] is not None and new_bound_pairs[0][0] < dense_info[0] < new_bound_pairs[target_indices[0]][1]:
@@ -332,7 +332,8 @@ class PB_linprog_params_from_eig:
             # Below, we use a symmetric bound extension for the ground and highest excited states in gen_bound_pairs; can be changed in future
             if bound_extension is not None:
                 self.bound_pairs, self.incl_endpoints, self.nonzero_b_indices = process_bound_pairs(gen_bound_pairs(self.unscaled_energies, bound_extension), target_indices, dense_info)
-
+                self.bound_pairs[0][0] = self.E0_rescale
+                self.bound_pairs[-1][-1] = self.Emax_rescale # Correctly sets the rescaled limits
             self.constraint_pts = self._get_exact_constraints() if use_exact_energies else self._get_dense_constraints()
         self.A_ub_full = np.polynomial.chebyshev.chebvander(self.constraint_pts, self.max_poly_degree) if use_cheb else np.vander(self.constraint_pts, self.max_poly_degree + 1, increasing=True)
 
@@ -563,6 +564,13 @@ class PolyBounds_new():
                 raise ValueError(f"Requested poly_degree {deg} is outside [0, {self.max_poly_degree}].")
             current_values = self.values[:deg + 1]
             current_A = self.A_ub[:, :deg + 1]
+            
+            # if kwargs.get('use_cheb'):
+            #     domain = (self.constraint_pts[0], self.constraint_pts[-1])
+            #     M = chebyshev_matrix_from_degree(deg, domain=domain)
+            #     current_values = M @ current_values
+                # current_A = current_A @ M.T
+
             # print("Condition number for A: ", np.linalg.cond(current_A))
             LB_result = linprog(-current_values, A_ub=current_A, b_ub=self.b_ub, bounds=(-bound, bound), method=method, options=linprog_options)
             UB_result = linprog(current_values, A_ub=-current_A, b_ub=-self.b_ub, bounds=(-bound, bound), method=method, options=linprog_options)
@@ -588,7 +596,7 @@ class PolyBounds_new():
                     "UB_result": UB_result,
                     "poly_degree": deg,
                     "bounds": degree_bounds,
-                    "used_cheb": kwargs.get("used_cheb", False),
+                    "used_cheb": kwargs.get('use_cheb', False),
                     "legend_anchor": kwargs.get("legend_anchor", (1,0.2)),
                     "show_constraint_points": kwargs.get("show_constraint_points", True),
                     "linewidth": kwargs.get("linewidth", 1),
@@ -596,7 +604,6 @@ class PolyBounds_new():
                     "show_lowest_highest": kwargs.get("show_lowest_highest", False),
                     "constraint_recipe_obj": kwargs.get("constraint_recipe_obj"),
                     "plot_title": (kwargs.get("plot_title","")),
-                    "plot_chebyshev": kwargs.get("plot_chebyshev", False),
                     "truncate_lower": kwargs.get("truncate_lower"),
                 }
                 # prepare save path if requested
@@ -719,7 +726,7 @@ class PolyBounds_SIP:
         if O_exact is not None:
             print("Exact overlap:", O_exact)
 
-    def optimize(self, intervals, lower_coefs_list, solver="SCS", verbose=False, global_bnd=None, solver_max_iters=None, poly_degrees=None, visualize=False, use_chebyshev=True, **kwargs):
+    def optimize(self, intervals, lower_coefs_list, solver="SCS", verbose=False, global_bnd=None, solver_max_iters=None, poly_degrees=None, visualize=False, use_cheb=True, initial_guesses=None, inherit_from_last=False, **kwargs):
         """
         SOS/SDP (power basis or Chebyshev basis) for piecewise polynomial constraints on intervals.
         Two SDPs:
@@ -731,6 +738,8 @@ class PolyBounds_SIP:
         solver: CVXPY solver name (default "SCS")
         solver_max_iters: optional int, forwarded to cp.Problem.solve(...) as max_iters when provided
         use_chebyshev: bool, if True, use Chebyshev basis for optimization variables (default True)
+        initial_guesses: dict {degree: {'c_LB': array, 'c_UB': array}}, optional initial guesses for coefficients.
+        inherit_from_last: bool, if True, use previous degree's solution as initial guess for next degree.
         """
         if len(lower_coefs_list) != len(intervals):
             raise ValueError("lower_coefs_list must have the same length as intervals.")
@@ -753,7 +762,8 @@ class PolyBounds_SIP:
         if solver_max_iters is not None:
             if solver == "MOSEK":
                 solve_kwargs["mosek_params"] = {
-                    "MSK_IPAR_INTPNT_MAX_ITERATIONS": int(solver_max_iters)
+                    "MSK_IPAR_INTPNT_MAX_ITERATIONS": int(solver_max_iters),
+                    "MSK_DPAR_INTPNT_TOL_REL_STEP": 0.1,
                 }
             else:
                 solve_kwargs['max_iters'] = int(solver_max_iters)
@@ -772,15 +782,15 @@ class PolyBounds_SIP:
             return g[:new_len]
         
         def solve_for_degree(degree, init_c_LB=None, init_c_UB=None):
-            if use_chebyshev:
+            if use_cheb:
                 M_trans = chebyshev_matrix_from_degree(degree)
                 M = M_trans @ self.values[:degree + 1]
             else:
                 M = self.values[:degree + 1]
-
+            
             def interval_constraints(cvar, sign):
                 cons = []
-                if use_chebyshev:
+                if use_cheb:
                     c_power_expr = M_trans.T @ cvar
 
                 for (l, r), lcoef in zip(intervals, lower_coefs_list):
@@ -798,7 +808,7 @@ class PolyBounds_SIP:
                             for j in range(len(quad)):
                                 conv[i + j] += sb[i] * quad[j] # Multiply b(x) by ( -l r + (l + r) x - x^2 )
                         
-                        if use_chebyshev:
+                        if use_cheb:
                             cp_poly = [c_power_expr[i] if i <= degree else 0 for i in range(deg_r + 1)]
                         else:
                             cp_poly = [cvar[i] if i <= degree else 0 for i in range(deg_r + 1)]
@@ -826,7 +836,7 @@ class PolyBounds_SIP:
                             term_d[i] += r * sd[i] # Multiply by ( r )
                             term_d[i + 1] -= sd[i] # Multiply by ( -x )
                         
-                        if use_chebyshev:
+                        if use_cheb:
                             cp_poly = [c_power_expr[i] if i <= degree else 0 for i in range(deg_r + 1)]
                         else:
                             cp_poly = [cvar[i] if i <= degree else 0 for i in range(deg_r + 1)]
@@ -841,7 +851,7 @@ class PolyBounds_SIP:
                 return cons
 
             c_LB = cp.Variable(degree + 1)
-            if init_c_LB is not None:
+            if init_c_LB is not None and inherit_from_last:
                 try:
                     c_LB.value = np.asarray(init_c_LB, dtype=float)
                 except Exception:
@@ -855,7 +865,7 @@ class PolyBounds_SIP:
             LB_val = float(M @ c_LB.value) if c_LB.value is not None else None
 
             c_UB = cp.Variable(degree + 1)
-            if init_c_UB is not None:
+            if init_c_UB is not None and inherit_from_last:
                 try:
                     c_UB.value = np.asarray(init_c_UB, dtype=float)
                 except Exception:
@@ -881,16 +891,28 @@ class PolyBounds_SIP:
                 "c_UB": c_UB.value,
                 "LB_result": lb_dummy,
                 "UB_result": ub_dummy,
-                "basis": "chebyshev" if use_chebyshev else "power"
+                "basis": "chebyshev" if use_cheb else "power"
             }
 
         summaries = []
         prev_c_LB = None
         prev_c_UB = None
         for deg in poly_degrees:
-            # build warm starts by padding/truncating as needed
-            init_lb = _expand(prev_c_LB, deg + 1)
-            init_ub = _expand(prev_c_UB, deg + 1)
+            # Determine initial guesses
+            init_lb = None
+            init_ub = None
+            
+            # 1. Check explicit initial guesses for this degree
+            if initial_guesses is not None and deg in initial_guesses:
+                init_lb = initial_guesses[deg].get('c_LB')
+                init_ub = initial_guesses[deg].get('c_UB')
+            
+            # 2. If not found, use warm start from previous degree
+            if init_lb is None:
+                init_lb = _expand(prev_c_LB, deg + 1)
+            if init_ub is None:
+                init_ub = _expand(prev_c_UB, deg + 1)
+
             summary = solve_for_degree(deg, init_c_LB=init_lb, init_c_UB=init_ub)
             summaries.append(summary)
             prev_c_LB = summary.get("c_LB")
@@ -913,7 +935,7 @@ class PolyBounds_SIP:
                 # Prepare coefficients for plotting (must be power basis)
                 c_LB_plot = summary.get("c_LB")
                 c_UB_plot = summary.get("c_UB")
-                if use_chebyshev:
+                if use_cheb:
                     M_trans = chebyshev_matrix_from_degree(deg)
                     if c_LB_plot is not None:
                         c_LB_plot = M_trans.T @ c_LB_plot
@@ -1092,6 +1114,14 @@ class OverlapEstimator:
         self.exact_overlaps = exact_overlaps
         self.exact_energies = exact_energies
         self.last_results = None
+        self.exact_mode_coeffs = {} # Stores {degree: {'c_LB': ..., 'c_UB': ...}} from exact mode
+        self.approx_mode_coeffs = {}
+        self.manual_mode_coeffs = {}
+
+    def _convert_power_to_chebyshev(self, coeffs):
+        """Convert power basis coefficients to Chebyshev basis coefficients."""
+        return chebyshev.poly2cheb(coeffs)
+
 
     def _normalize_modes(self, recipe: dict):
         modes = recipe.get("mode")
@@ -1164,7 +1194,31 @@ class OverlapEstimator:
         self.last_results = all_payloads[-1] if all_payloads else None
         return all_payloads if len(all_payloads) > 1 else all_payloads[0]
 
-    def save_results(self, results, output_file_path, fmt='json'):
+    def distill_results(self, results):
+        """
+        Distill the full results into a condensed version containing only
+        degrees, bounds, and coefficients.
+        """
+        if results is None:
+            return None
+            
+        # Normalize to list
+        is_list = isinstance(results, list)
+        payloads = results if is_list else [results]
+        
+        distilled = []
+        for payload in payloads:
+            mode = payload.get("mode")
+            degree_results = payload.get("degree_results", [])
+            
+            distilled.append({
+                "mode": mode,
+                "degree_results": degree_results
+            })
+            
+        return distilled if is_list else distilled[0]
+
+    def save_results(self, results, output_file_path, fmt='json', distilled=False):
         """Save compute_bounds results to a local file.
 
         Supported formats: 'json', 'csv', 'pickle'.
@@ -1175,6 +1229,10 @@ class OverlapEstimator:
 
         if results is None:
             raise ValueError("No results to save")
+            
+        if distilled:
+            results = self.distill_results(results)
+
         # Normalize to list
         payloads = results if isinstance(results, (list, tuple)) else [results]
         def _to_basic(o):
@@ -1258,11 +1316,37 @@ class OverlapEstimator:
             formatted = []
             for entry in solver_output:
                 bounds = entry.get("bounds", [np.nan, np.nan])
-                formatted.append({
+                
+                # Extract coefficients
+                c_LB = None
+                c_UB = None
+                
+                # Check for PolyBounds_SIP format
+                if "c_LB" in entry:
+                    c_LB = entry["c_LB"]
+                    c_UB = entry["c_UB"]
+                # Check for PolyBounds_new format (exact mode)
+                elif "LB_result" in entry:
+                    if entry["LB_result"].success:
+                        c_LB = entry["LB_result"].x
+                    if entry["UB_result"].success:
+                        c_UB = entry["UB_result"].x
+                
+                res = {
                     "degree": entry.get("degree"),
                     "lower": bounds[0],
                     "upper": bounds[1]
-                })
+                }
+                if c_LB is not None:
+                    res["c_LB"] = c_LB.tolist() if hasattr(c_LB, "tolist") else c_LB
+                if c_UB is not None:
+                    res["c_UB"] = c_UB.tolist() if hasattr(c_UB, "tolist") else c_UB
+                
+                # Include basis info if available
+                if "basis" in entry:
+                    res["basis"] = entry["basis"]
+                    
+                formatted.append(res)
             return formatted
         if isinstance(solver_output, tuple) and len(solver_output) == 3:
             bounds = solver_output[2]
@@ -1339,7 +1423,20 @@ class OverlapEstimator:
             save_plots=kwargs.get('save_plots', False),
             save_dir=kwargs.get('save_dir', None),
             mode=kwargs.get('mode', None),
+            use_cheb=recipe.get("use_cheb", True)
         )
+        
+        # Store optimal coefficients for later use
+        for entry in solver_output:
+            deg = entry.get("degree")
+            lb_res = entry.get("LB_result")
+            ub_res = entry.get("UB_result")
+            if lb_res and lb_res.success and ub_res and ub_res.success:
+                self.exact_mode_coeffs[deg] = {
+                    'c_LB': lb_res.x,
+                    'c_UB': ub_res.x
+                }
+
         summary = self._format_solver_output(solver_output, poly_degrees)
         return {
             "mode": "exact",
@@ -1363,7 +1460,7 @@ class OverlapEstimator:
             use_exact_energies=True,
             use_all_evals=recipe.get("use_all_evals", False),
             custom_constraints=recipe.get("custom_constraints"),
-            use_cheb=recipe.get("use_cheb", False),
+            use_cheb=recipe.get("use_cheb", True),
             rescale=recipe.get("rescale", True),
             bound_extension=bound_extension,
             dense_info=dense_info,
@@ -1378,6 +1475,23 @@ class OverlapEstimator:
             region_b_list[int(idx)] = b_val
         values = constraint_info.get_moment_values(max_degree)
         sip = PolyBounds_SIP(values, poly_degree=max_degree, O_exact=constraint_info.get_exact_ovlp(b_values))
+        
+        # Prepare initial guesses from exact mode if available
+        initial_guesses = {}
+        use_chebyshev = recipe.get("use_chebyshev", True)
+        if self.exact_mode_coeffs:
+            for deg in poly_degrees:
+                if deg in self.exact_mode_coeffs:
+                    c_LB = self.exact_mode_coeffs[deg]['c_LB']
+                    c_UB = self.exact_mode_coeffs[deg]['c_UB']
+
+                    # Convert to Chebyshev if needed
+                    # if use_chebyshev:
+                    #     c_LB = self._convert_power_to_chebyshev(c_LB)
+                    #     c_UB = self._convert_power_to_chebyshev(c_UB)
+                    
+                    initial_guesses[deg] = {'c_LB': c_LB, 'c_UB': c_UB}
+
         solver_output = sip.optimize(
             intervals,
             region_b_list,
@@ -1387,11 +1501,25 @@ class OverlapEstimator:
             solver_max_iters=recipe.get("solver_max_iters"),
             poly_degrees=poly_degrees,
             visualize=visualize,
+            use_cheb=use_chebyshev,
+            initial_guesses=initial_guesses,
             plot_title = "Approx Mode",
             save_plots=kwargs.get('save_plots', False),
             save_dir=kwargs.get('save_dir', None),
             mode=kwargs.get('mode', None),
         )
+        
+        # Store optimal coefficients
+        for entry in solver_output:
+            deg = entry.get("degree")
+            c_LB = entry.get("c_LB")
+            c_UB = entry.get("c_UB")
+            if c_LB is not None and c_UB is not None:
+                self.approx_mode_coeffs[deg] = {
+                    'c_LB': c_LB,
+                    'c_UB': c_UB
+                }
+
         summary = self._format_solver_output(solver_output, poly_degrees)
         return {
             "mode": "approx",
@@ -1422,6 +1550,27 @@ class OverlapEstimator:
             else:
                 lower_coefs_list.append([b_val])
         sip = PolyBounds_SIP(manual_moments[:max_degree + 1], poly_degree=max_degree)
+        
+        # Prepare initial guesses from exact mode if available
+        initial_guesses = {}
+        # use_chebyshev = recipe.get("use_cheb", True)
+        if self.exact_mode_coeffs:
+            for deg in poly_degrees:
+                if deg in self.exact_mode_coeffs:
+                    c_LB = self.exact_mode_coeffs[deg]['c_LB']
+                    c_UB = self.exact_mode_coeffs[deg]['c_UB']
+                    
+                    # Shift to be feasible
+                    # c_LB = self._shift_polynomial_to_feasible(c_LB, intervals, lower_coefs_list, is_lower_bound=True)
+                    # c_UB = self._shift_polynomial_to_feasible(c_UB, intervals, lower_coefs_list, is_lower_bound=False)
+                    
+                    # Convert to Chebyshev if needed
+                    # if use_chebyshev:
+                    #     c_LB = self._convert_power_to_chebyshev(c_LB)
+                    #     c_UB = self._convert_power_to_chebyshev(c_UB)
+                    
+                    initial_guesses[deg] = {'c_LB': c_LB, 'c_UB': c_UB}
+
         solver_output = sip.optimize(
             intervals,
             lower_coefs_list,
@@ -1431,11 +1580,25 @@ class OverlapEstimator:
             solver_max_iters=recipe.get("solver_max_iters"),
             poly_degrees=poly_degrees,
             visualize=visualize,
+            use_cheb=recipe.get("use_cheb", True),
+            initial_guesses=initial_guesses,
             plot_title = "Manual Mode",
             save_plots=kwargs.get('save_plots', False),
             save_dir=kwargs.get('save_dir', None),
             mode=kwargs.get('mode', None),
         )
+        
+        # Store optimal coefficients
+        for entry in solver_output:
+            deg = entry.get("degree")
+            c_LB = entry.get("c_LB")
+            c_UB = entry.get("c_UB")
+            if c_LB is not None and c_UB is not None:
+                self.manual_mode_coeffs[deg] = {
+                    'c_LB': c_LB,
+                    'c_UB': c_UB
+                }
+
         summary = self._format_solver_output(solver_output, poly_degrees)
         return {
             "mode": "manual",
