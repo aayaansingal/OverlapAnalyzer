@@ -332,8 +332,8 @@ class PB_linprog_params_from_eig:
             # Below, we use a symmetric bound extension for the ground and highest excited states in gen_bound_pairs; can be changed in future
             if bound_extension is not None:
                 self.bound_pairs, self.incl_endpoints, self.nonzero_b_indices = process_bound_pairs(gen_bound_pairs(self.unscaled_energies, bound_extension), target_indices, dense_info)
-                self.bound_pairs[0][0] = self.E0_rescale
-                self.bound_pairs[-1][-1] = self.Emax_rescale # Correctly sets the rescaled limits
+                # self.bound_pairs[0][0] = self.E0_rescale
+                # self.bound_pairs[-1][-1] = self.Emax_rescale # Correctly sets the rescaled limits
             self.constraint_pts = self._get_exact_constraints() if use_exact_energies else self._get_dense_constraints()
         self.A_ub_full = np.polynomial.chebyshev.chebvander(self.constraint_pts, self.max_poly_degree) if use_cheb else np.vander(self.constraint_pts, self.max_poly_degree + 1, increasing=True)
 
@@ -727,20 +727,8 @@ class PolyBounds_SIP:
             print("Exact overlap:", O_exact)
 
     def optimize(self, intervals, lower_coefs_list, solver="SCS", verbose=False, global_bnd=None, solver_max_iters=None, poly_degrees=None, visualize=False, use_cheb=True, initial_guesses=None, inherit_from_last=False, **kwargs):
-        """
-        SOS/SDP (power basis or Chebyshev basis) for piecewise polynomial constraints on intervals.
-        Two SDPs:
-        1) Minorizer p_l:  l_j(x) - p_l(x) is SOS on I_j, maximize M·c
-        2) Majorizer p_u:  p_u(x) - l_j(x) is SOS on I_j, minimize M·c
+        import cvxpy as cp
 
-        intervals: list[(a,b)]
-        lower_coefs_list: list of lists/arrays; coefficients of l_j(x) in power basis (lowest degree first)
-        solver: CVXPY solver name (default "SCS")
-        solver_max_iters: optional int, forwarded to cp.Problem.solve(...) as max_iters when provided
-        use_chebyshev: bool, if True, use Chebyshev basis for optimization variables (default True)
-        initial_guesses: dict {degree: {'c_LB': array, 'c_UB': array}}, optional initial guesses for coefficients.
-        inherit_from_last: bool, if True, use previous degree's solution as initial guess for next degree.
-        """
         if len(lower_coefs_list) != len(intervals):
             raise ValueError("lower_coefs_list must have the same length as intervals.")
         if poly_degrees is None:
@@ -755,22 +743,27 @@ class PolyBounds_SIP:
                 raise ValueError(f"Requested poly_degree {deg} is outside [0, {max_available}].")
 
         solve_kwargs = {}
-        # Increase default max iterations for MOSEK if not specified
         if solver == "MOSEK" and solver_max_iters is None:
-            solver_max_iters = 10000
-
+            solver_max_iters = 1e6
         if solver_max_iters is not None:
             if solver == "MOSEK":
                 solve_kwargs["mosek_params"] = {
                     "MSK_IPAR_INTPNT_MAX_ITERATIONS": int(solver_max_iters),
-                    "MSK_DPAR_INTPNT_TOL_REL_STEP": 0.1,
+                    "MSK_DPAR_INTPNT_TOL_PFEAS": 1e-7,
+                    "MSK_DPAR_INTPNT_TOL_DFEAS": 1e-7,
+                    "MSK_DPAR_INTPNT_TOL_MU_RED": 1e-7
                 }
             else:
                 solve_kwargs['max_iters'] = int(solver_max_iters)
 
-        def pad(lst, max_L):
-            return list(lst) + [0] * (max_L - len(lst))
-        
+        # small regularizer for Gram matrices
+        gram_eps = float(kwargs.get("gram_eps", 1e-9))
+
+        def pad_expr(lst, max_L):
+            out = list(lst)
+            out.extend([0] * (max_L - len(out)))
+            return out
+
         def _expand(guess, new_len):
             if guess is None:
                 return None
@@ -778,78 +771,147 @@ class PolyBounds_SIP:
             if g.shape[0] == new_len:
                 return g
             if g.shape[0] < new_len:
-                return pad(g, new_len)
+                return list(g) + [0.0] * (new_len - g.shape[0])
             return g[:new_len]
-        
+
+        # Helper: convert Gram matrix Q (Chebyshev basis v = [T0..T_{d-1}]) to power-basis coefficients.
+        # It computes cheb_coeffs[k] = sum_{i,j} Q[i,j] * coeff_of_TiTj_in_Tk  (using T_i*T_j identities),
+        # then converts Chebyshev coefficients -> power basis via the provided transform.
+        def gram_to_cheb_power(Q, d):
+            # produce Chebyshev coefficients of v^T Q v (length 2*(d-1)+1)
+            L_cheb = 2 * (d - 1) + 1
+            cheb_coefs = [0] * L_cheb  # will hold cvxpy expressions
+            # T_i * T_j expansion rules:
+            # T_0 * T_0 = T_0
+            # T_0 * T_j = T_j
+            # T_i * T_j = 0.5*(T_{i+j} + T_{|i-j|})  for i,j >=1
+            for i in range(d):
+                for j in range(d):
+                    q_ij = Q[i, j]
+                    if i == 0 and j == 0:
+                        cheb_coefs[0] = cheb_coefs[0] + q_ij
+                    elif i == 0:
+                        # T_0 * T_j = T_j
+                        idx = j
+                        cheb_coefs[idx] = cheb_coefs[idx] + q_ij
+                    elif j == 0:
+                        idx = i
+                        cheb_coefs[idx] = cheb_coefs[idx] + q_ij
+                    else:
+                        # add 0.5 * q_ij to T_{i+j} and T_{|i-j|}
+                        idx1 = i + j
+                        idx2 = abs(i - j)
+                        cheb_coefs[idx1] = cheb_coefs[idx1] + 0.5 * q_ij
+                        cheb_coefs[idx2] = cheb_coefs[idx2] + 0.5 * q_ij
+
+            # convert cheb_coefs -> power-basis coefficients via T_matrix (degree = L_cheb-1)
+            T_full = chebyshev_matrix_from_degree(L_cheb - 1)  # shape (L_cheb, L_cheb)
+            # power_coeffs[j] = sum_i T_full[i, j] * cheb_coefs[i]
+            power_len = L_cheb
+            power_coefs = []
+            for j in range(power_len):
+                # build sum_i T_full[i,j] * cheb_coefs[i]
+                expr = 0
+                for i in range(L_cheb):
+                    coef_ij = float(T_full[i, j]) if T_full[i, j] != 0 else 0.0
+                    if coef_ij != 0.0:
+                        expr = expr + coef_ij * cheb_coefs[i]
+                power_coefs.append(expr)
+            return power_coefs  # list of cvxpy expressions (length = 2*(d-1)+1)
+
         def solve_for_degree(degree, init_c_LB=None, init_c_UB=None):
             if use_cheb:
-                M_trans = chebyshev_matrix_from_degree(degree)
-                M = M_trans @ self.values[:degree + 1]
+                T = chebyshev_matrix_from_degree(degree)               # T[i,j] : coeff of x^j in T_i(x)
+                M = T @ self.values[:degree + 1]
             else:
-                M = self.values[:degree + 1]
-            
+                M = self.values[:degree + 1].astype(float)
+
+            deg_r = int(max(1, degree))
+
+            def power_coeffs_from_cvar(cvar):
+                if use_cheb:
+                    return [sum(T[j, k] * cvar[j] for j in range(degree + 1)) for k in range(degree + 1)]
+                else:
+                    return [cvar[i] for i in range(degree + 1)]
+
             def interval_constraints(cvar, sign):
                 cons = []
-                if use_cheb:
-                    c_power_expr = M_trans.T @ cvar
+                cp_power = power_coeffs_from_cvar(cvar)
 
                 for (l, r), lcoef in zip(intervals, lower_coefs_list):
-                    deg_r = int(max(1, degree))
                     if deg_r % 2 == 0:
                         d_sa = deg_r // 2 + 1
                         d_sb = d_sa - 1
-                        Qa = cp.Variable((d_sa, d_sa), PSD=True) # a(x)
-                        Qb = cp.Variable((d_sb, d_sb), PSD=True) # b(x)
-                        sa = gram_to_coefs(Qa, d_sa)
-                        sb = gram_to_coefs(Qb, d_sb)
+                        Qa = cp.Variable((d_sa, d_sa), PSD=True)
+                        Qb = cp.Variable((d_sb, d_sb), PSD=True)
+
+                        # choose Gram->power coefficients depending on basis (Fix 2)
+                        if use_cheb:
+                            sa = gram_to_cheb_power(Qa, d_sa)
+                            sb = gram_to_cheb_power(Qb, d_sb)
+                        else:
+                            sa = gram_to_coefs(Qa, d_sa)
+                            sb = gram_to_coefs(Qb, d_sb)
+
                         quad = [-l * r, (l + r), -1.0]
-                        conv = pad([], len(sb) + 2)
+                        conv = [0.0] * (len(sb) + 2)
                         for i in range(len(sb)):
                             for j in range(len(quad)):
-                                conv[i + j] += sb[i] * quad[j] # Multiply b(x) by ( -l r + (l + r) x - x^2 )
-                        
-                        if use_cheb:
-                            cp_poly = [c_power_expr[i] if i <= degree else 0 for i in range(deg_r + 1)]
-                        else:
-                            cp_poly = [cvar[i] if i <= degree else 0 for i in range(deg_r + 1)]
-                        
-                        lp = pad([lcoef], deg_r + 1)
-                        rcoefs = [sign * (cp_poly[k] - lp[k]) for k in range(deg_r + 1)]
+                                conv[i + j] += sb[i] * quad[j]
+
+                        lp = pad_expr([lcoef], deg_r + 1)
+                        rcoefs = [sign * (cp_power[k] - lp[k]) for k in range(deg_r + 1)]
+
                         L = max(len(rcoefs), len(sa), len(conv))
-                        cons_a, cons_b, cons_f = pad(sa, L), pad(conv, L), pad(rcoefs, L)
+                        a_coeffs = pad_expr(sa, L)
+                        b_coeffs = pad_expr(conv, L)
+                        f_coeffs = pad_expr(rcoefs, L)
                         for k in range(deg_r + 1):
-                            cons.append(cons_f[k] == cons_a[k] + cons_b[k])
-                        cons.extend([Qa >> 0, Qb >> 0])
+                            cons.append(f_coeffs[k] == a_coeffs[k] + b_coeffs[k])
+
+                        # PSD with small regularizer (Fix 3)
+                        cons.append(Qa >> gram_eps * np.eye(d_sa))
+                        cons.append(Qb >> gram_eps * np.eye(d_sb))
+
                     else:
                         d_sc = (deg_r + 1) // 2
                         d_sd = (deg_r + 1) // 2
                         Qc = cp.Variable((d_sc, d_sc), PSD=True)
                         Qd = cp.Variable((d_sd, d_sd), PSD=True)
-                        sc = gram_to_coefs(Qc, d_sc)
-                        sd = gram_to_coefs(Qd, d_sd)
-                        term_c = pad([], len(sc) + 1)
-                        for i in range(len(sc)):
-                            term_c[i] -= l * sc[i] # Multiply by ( -l )
-                            term_c[i + 1] += sc[i] # Multiply by ( x )
-                        term_d = pad([], len(sd) + 1)
-                        for i in range(len(sd)):
-                            term_d[i] += r * sd[i] # Multiply by ( r )
-                            term_d[i + 1] -= sd[i] # Multiply by ( -x )
-                        
+
                         if use_cheb:
-                            cp_poly = [c_power_expr[i] if i <= degree else 0 for i in range(deg_r + 1)]
+                            sc = gram_to_cheb_power(Qc, d_sc)
+                            sd = gram_to_cheb_power(Qd, d_sd)
                         else:
-                            cp_poly = [cvar[i] if i <= degree else 0 for i in range(deg_r + 1)]
-                        
-                        lp = pad([lcoef], deg_r + 1)
-                        rcoefs = [sign * (cp_poly[k] - lp[k]) for k in range(deg_r + 1)]
+                            sc = gram_to_coefs(Qc, d_sc)
+                            sd = gram_to_coefs(Qd, d_sd)
+
+                        term_c = [0.0] * (len(sc) + 1)
+                        for i in range(len(sc)):
+                            term_c[i] += -l * sc[i]
+                            term_c[i + 1] += sc[i]
+                        term_d = [0.0] * (len(sd) + 1)
+                        for i in range(len(sd)):
+                            term_d[i] += r * sd[i]
+                            term_d[i + 1] += -sd[i]
+
+                        lp = pad_expr([lcoef], deg_r + 1)
+                        rcoefs = [sign * (cp_power[k] - lp[k]) for k in range(deg_r + 1)]
+
                         L = max(len(rcoefs), len(term_c), len(term_d))
-                        cons_c, cons_d, cons_f = pad(term_c, L), pad(term_d, L), pad(rcoefs, L)
+                        c_coeffs = pad_expr(term_c, L)
+                        d_coeffs = pad_expr(term_d, L)
+                        f_coeffs = pad_expr(rcoefs, L)
                         for k in range(deg_r + 1):
-                            cons.append(cons_f[k] == cons_c[k] + cons_d[k])
-                        cons.extend([Qc >> 0, Qd >> 0])
+                            cons.append(f_coeffs[k] == c_coeffs[k] + d_coeffs[k])
+
+                        # PSD with small regularizer
+                        cons.append(Qc >> gram_eps * np.eye(d_sc))
+                        cons.append(Qd >> gram_eps * np.eye(d_sd))
+
                 return cons
 
+            # Lower bound problem
             c_LB = cp.Variable(degree + 1)
             if init_c_LB is not None and inherit_from_last:
                 try:
@@ -859,11 +921,13 @@ class PolyBounds_SIP:
             cons_LB = interval_constraints(c_LB, sign=-1)
             if global_bnd is not None:
                 cons_LB.append(c_LB <= global_bnd)
-                cons_LB.append(-global_bnd <= c_LB)
+                cons_LB.append(c_LB >= -global_bnd)
             prob_LB = cp.Problem(cp.Maximize(M @ c_LB), cons_LB)
             prob_LB.solve(solver=solver, verbose=verbose, warm_start=True, **solve_kwargs)
-            LB_val = float(M @ c_LB.value) if c_LB.value is not None else None
+            c_LB_val = np.array([ci.value for ci in c_LB]) if all(ci.value is not None for ci in c_LB) else None
+            LB_val = float(M @ c_LB_val) if c_LB_val is not None else None
 
+            # Upper bound problem
             c_UB = cp.Variable(degree + 1)
             if init_c_UB is not None and inherit_from_last:
                 try:
@@ -876,10 +940,11 @@ class PolyBounds_SIP:
                 cons_UB.append(c_UB >= -global_bnd)
             prob_UB = cp.Problem(cp.Minimize(M @ c_UB), cons_UB)
             prob_UB.solve(solver=solver, verbose=verbose, warm_start=True, **solve_kwargs)
-            UB_val = float(M @ c_UB.value) if c_UB.value is not None else None
+            c_UB_val = np.array([ci.value for ci in c_UB]) if all(ci.value is not None for ci in c_UB) else None
+            UB_val = float(M @ c_UB_val) if c_UB_val is not None else None
 
-            lb_dummy = type("obj", (), {"x": c_LB.value})
-            ub_dummy = type("obj", (), {"x": c_UB.value})
+            lb_dummy = type("obj", (), {"x": c_LB_val})
+            ub_dummy = type("obj", (), {"x": c_UB_val})
             bounds = [LB_val, UB_val]
             print(f"SOS bounds (degree {degree}):", bounds)
             return {
@@ -887,27 +952,23 @@ class PolyBounds_SIP:
                 "bounds": bounds,
                 "LB_problem": prob_LB,
                 "UB_problem": prob_UB,
-                "c_LB": c_LB.value,
-                "c_UB": c_UB.value,
+                "c_LB": c_LB_val,
+                "c_UB": c_UB_val,
                 "LB_result": lb_dummy,
                 "UB_result": ub_dummy,
                 "basis": "chebyshev" if use_cheb else "power"
             }
 
+        # main loop over degrees (warm-starting)
         summaries = []
         prev_c_LB = None
         prev_c_UB = None
         for deg in poly_degrees:
-            # Determine initial guesses
             init_lb = None
             init_ub = None
-            
-            # 1. Check explicit initial guesses for this degree
             if initial_guesses is not None and deg in initial_guesses:
                 init_lb = initial_guesses[deg].get('c_LB')
                 init_ub = initial_guesses[deg].get('c_UB')
-            
-            # 2. If not found, use warm start from previous degree
             if init_lb is None:
                 init_lb = _expand(prev_c_LB, deg + 1)
             if init_ub is None:
@@ -917,7 +978,8 @@ class PolyBounds_SIP:
             summaries.append(summary)
             prev_c_LB = summary.get("c_LB")
             prev_c_UB = summary.get("c_UB")
-            # handle visualization and optional saving
+
+            # plotting (convert cheb -> power for display)
             save_plots = bool(kwargs.get('save_plots', False))
             save_dir = kwargs.get('save_dir', None)
             mode_name = kwargs.get('mode', None)
@@ -931,16 +993,15 @@ class PolyBounds_SIP:
                     title_safe = title.replace(' ', '_')
                     fname = f"{title_safe}_deg{deg}.pdf"
                     save_path = os.path.join(save_dir, fname)
-                
-                # Prepare coefficients for plotting (must be power basis)
+
                 c_LB_plot = summary.get("c_LB")
                 c_UB_plot = summary.get("c_UB")
                 if use_cheb:
-                    M_trans = chebyshev_matrix_from_degree(deg)
+                    T = chebyshev_matrix_from_degree(deg)
                     if c_LB_plot is not None:
-                        c_LB_plot = M_trans.T @ c_LB_plot
+                        c_LB_plot = T.T @ c_LB_plot
                     if c_UB_plot is not None:
-                        c_UB_plot = M_trans.T @ c_UB_plot
+                        c_UB_plot = T.T @ c_UB_plot
 
                 self.plot_results(
                     intervals,
@@ -961,6 +1022,8 @@ class PolyBounds_SIP:
                     mode=mode_name,
                 )
         return summaries
+
+
 
     def plot_results(self, intervals, poly_degree=None, lower_coefs_list=None, n_plot_points=1000, linewidth=2, title=None, show_spectrum=False, show=True, save_path=None, legend_anchor=(1,0.2), show_constraint_points=False, plot_chebyshev=False, constraint_recipe_obj=None, truncate_lower=None, **kwargs):
         """
@@ -1473,25 +1536,17 @@ class OverlapEstimator:
         region_b_list = np.zeros(len(intervals))
         for idx, b_val in zip(np.atleast_1d(constraint_info.nonzero_b_indices), b_values):
             region_b_list[int(idx)] = b_val
-        values = constraint_info.get_moment_values(max_degree)
+        values = constraint_info.moments
         sip = PolyBounds_SIP(values, poly_degree=max_degree, O_exact=constraint_info.get_exact_ovlp(b_values))
         
         # Prepare initial guesses from exact mode if available
         initial_guesses = {}
-        use_chebyshev = recipe.get("use_chebyshev", True)
-        if self.exact_mode_coeffs:
+        if self.exact_mode_coeffs and recipe.get("use_exact_initial_guesses", False):
             for deg in poly_degrees:
                 if deg in self.exact_mode_coeffs:
                     c_LB = self.exact_mode_coeffs[deg]['c_LB']
                     c_UB = self.exact_mode_coeffs[deg]['c_UB']
-
-                    # Convert to Chebyshev if needed
-                    # if use_chebyshev:
-                    #     c_LB = self._convert_power_to_chebyshev(c_LB)
-                    #     c_UB = self._convert_power_to_chebyshev(c_UB)
-                    
                     initial_guesses[deg] = {'c_LB': c_LB, 'c_UB': c_UB}
-
         solver_output = sip.optimize(
             intervals,
             region_b_list,
@@ -1501,7 +1556,7 @@ class OverlapEstimator:
             solver_max_iters=recipe.get("solver_max_iters"),
             poly_degrees=poly_degrees,
             visualize=visualize,
-            use_cheb=use_chebyshev,
+            use_cheb=recipe.get("use_cheb", True),
             initial_guesses=initial_guesses,
             plot_title = "Approx Mode",
             save_plots=kwargs.get('save_plots', False),
@@ -1553,22 +1608,11 @@ class OverlapEstimator:
         
         # Prepare initial guesses from exact mode if available
         initial_guesses = {}
-        # use_chebyshev = recipe.get("use_cheb", True)
-        if self.exact_mode_coeffs:
+        if self.exact_mode_coeffs and recipe.get("use_exact_initial_guesses", False):
             for deg in poly_degrees:
                 if deg in self.exact_mode_coeffs:
                     c_LB = self.exact_mode_coeffs[deg]['c_LB']
                     c_UB = self.exact_mode_coeffs[deg]['c_UB']
-                    
-                    # Shift to be feasible
-                    # c_LB = self._shift_polynomial_to_feasible(c_LB, intervals, lower_coefs_list, is_lower_bound=True)
-                    # c_UB = self._shift_polynomial_to_feasible(c_UB, intervals, lower_coefs_list, is_lower_bound=False)
-                    
-                    # Convert to Chebyshev if needed
-                    # if use_chebyshev:
-                    #     c_LB = self._convert_power_to_chebyshev(c_LB)
-                    #     c_UB = self._convert_power_to_chebyshev(c_UB)
-                    
                     initial_guesses[deg] = {'c_LB': c_LB, 'c_UB': c_UB}
 
         solver_output = sip.optimize(
