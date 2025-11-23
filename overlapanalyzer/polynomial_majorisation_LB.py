@@ -1203,7 +1203,7 @@ class OverlapEstimator:
             normalized.append(str(mode).lower())
         if not normalized:
             raise ValueError("mode list cannot be empty.")
-        unsupported = set(normalized) - {"exact", "approx", "manual"}
+        unsupported = set(normalized) - {"exact", "approx", "manual", "below"}
         if unsupported:
             raise ValueError(f"Unsupported mode(s): {unsupported}.")
         return normalized
@@ -1251,8 +1251,10 @@ class OverlapEstimator:
                 payload = self._compute_exact_mode(mode_recipe, poly_degrees, visualize=visualize, save_plots=save_plots, save_dir=save_dir, mode=mode)
             elif mode == "approx":
                 payload = self._compute_approx_mode(mode_recipe, poly_degrees, visualize=visualize, save_plots=save_plots, save_dir=save_dir, mode=mode)
-            else:
+            elif mode == "manual":
                 payload = self._compute_manual_mode(mode_recipe, poly_degrees, visualize=visualize, save_plots=save_plots, save_dir=save_dir, mode=mode)
+            elif mode == 'below':
+                payload = self._compute_below_mode(mode_recipe, poly_degrees, visualize=visualize, save_plots=save_plots, save_dir=save_dir, mode=mode)
             all_payloads.append(payload)
         self.last_results = all_payloads[-1] if all_payloads else None
         return all_payloads if len(all_payloads) > 1 else all_payloads[0]
@@ -1650,6 +1652,84 @@ class OverlapEstimator:
             "intervals": intervals,
             "raw_solver_output": solver_output,
             "poly_degrees": list(poly_degrees)
+        }
+    
+    def _compute_below_mode(self, recipe: dict, poly_degrees, visualize:bool=False, **kwargs):
+        eig_results = self._load_eig_results(recipe)
+        energy_threshold = recipe.get("energy_threshold")
+        
+        if energy_threshold == "HF":
+            if "hf_energy" in eig_results:
+                energy_threshold = eig_results["hf_energy"]
+            else:
+                raise ValueError("hf_energy not found in eig_results, but energy_threshold is set to 'HF'.")
+        elif energy_threshold is None:
+            raise ValueError("energy_threshold must be provided for below mode.")
+        
+        exact_energies = eig_results['exact_energies_no_degen']
+        target_indices = [i for i, e in enumerate(exact_energies) if e < energy_threshold]
+        
+        constraint_info = PB_linprog_params_from_eig(
+            eig_results,
+            target_indices=target_indices,
+            use_exact_energies=True,
+            use_all_evals=True,
+            custom_constraints=recipe.get("custom_constraints"),
+            use_cheb=recipe.get("use_cheb", True),
+            rescale=recipe.get("rescale", True),
+            Energy_constraint_limits=recipe.get("energy_constraint_limits", (float('-inf'), float('inf')))
+        )
+        
+        max_degree = poly_degrees[-1]
+        if max_degree > constraint_info.max_poly_degree:
+            raise ValueError("Requested polynomial degree exceeds available moments.")
+            
+        # Calculate exact overlap
+        b_len_eig = np.array([1 if e < energy_threshold else 0 for e in exact_energies])
+        exact_overlap = constraint_info.get_exact_ovlp(b_len_eig)
+        
+        # Prepare SIP intervals
+        E0_rescale, Emax_rescale = eig_results['rescale_values']
+        threshold_rescaled = rescale_E(energy_threshold, E0_rescale, Emax_rescale)
+        
+        if threshold_rescaled <= -1:
+             intervals = [(-1, 1)]
+             region_b_list = [0]
+        elif threshold_rescaled >= 1:
+             intervals = [(-1, 1)]
+             region_b_list = [1]
+        else:
+             intervals = [(-1, threshold_rescaled), (threshold_rescaled, 1)]
+             region_b_list = [1, 0]
+             
+        values = constraint_info.moments
+        
+        sip = PolyBounds_SIP(values, poly_degree=max_degree, O_exact=exact_overlap)
+        
+        solver_output = sip.optimize(
+            intervals,
+            region_b_list,
+            solver=recipe.get("solver", "SCS"),
+            verbose=recipe.get("verbose", False),
+            global_bnd=recipe.get("global_bound"),
+            solver_max_iters=recipe.get("solver_max_iters", 1e6),
+            poly_degrees=poly_degrees,
+            visualize=visualize,
+            use_cheb=recipe.get("use_cheb", True),
+            plot_title = "Below Mode",
+            save_plots=kwargs.get('save_plots', False),
+            save_dir=kwargs.get('save_dir', None),
+            mode=kwargs.get('mode', None),
+        )
+        
+        summary = self._format_solver_output(solver_output, poly_degrees)
+        return {
+            "mode": "below",
+            "degree_results": summary,
+            "intervals": intervals,
+            "region_b_values": region_b_list,
+            "raw_solver_output": solver_output,
+            "exact_overlap": exact_overlap
         }
     
 class MultStateBounds:
