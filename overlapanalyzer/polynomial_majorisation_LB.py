@@ -4,6 +4,8 @@ import scipy as sp
 import copy
 import pandas as pd
 import cvxpy as cp
+import mosek
+from scipy.linalg import hankel
 from numpy.polynomial import chebyshev
 from numpy.polynomial import Polynomial
 from scipy.optimize import minimize, NonlinearConstraint, linprog
@@ -318,7 +320,7 @@ class PB_linprog_params_from_eig:
                 setattr(self, name, value)
 
         # Rescale parameters and overlaps
-        self.E0_rescale, self.Emax_rescale = eig_results['rescale_values']
+        self.E0_rescale, self.Emax_rescale = eig_results.get('rescale_values', (None, None))
         self.exact_overlaps = eig_results['overlaps'] if use_all_evals else eig_results['overlaps_truncated']
         self.unscaled_energies = eig_results['exact_energies_no_degen'] if use_all_evals else eig_results['exact_energies_truncated']
         self.exact_mask = (np.array(self.unscaled_energies) >= Energy_constraint_limits[0]) & (np.array(self.unscaled_energies) <= Energy_constraint_limits[1])
@@ -411,6 +413,99 @@ class PB_linprog_params_from_eig:
         A_ub = self.get_A_ub(poly_degree)
         b_ub = self.get_b_ub(b_list)
         return values, A_ub, b_ub
+
+    def get_hankel_matrix(self, n_moments=None):
+        """
+        Construct the Hankel matrix from the moments.
+        If n_moments is provided, use the first n_moments.
+        Otherwise use all available moments.
+        Note: A square Hankel matrix of size (n+1)x(n+1) requires moments m_0, ..., m_{2n}.
+        """
+        if n_moments is None:
+            n_moments = len(self.moments)
+        
+        # We need 2n+1 moments for size (n+1)x(n+1)
+        # So if we have k moments (0 to k-1), max index is k-1.
+        # 2n = k-1 => n = (k-1)/2.
+        
+        max_index = n_moments - 1
+        n = max_index // 2
+        
+        # Size is (n+1)
+        c = self.moments[0 : n+1]
+        r = self.moments[n : 2*n+1]
+        return hankel(c, r)
+
+    def check_hankel_psd(self, n_moments=None, tol=-1e-12):
+        """
+        Check if the Hankel matrix formed by the moments is PSD.
+        """
+        H = self.get_hankel_matrix(n_moments)
+        evals = np.linalg.eigvalsh(H)
+        min_eig = np.min(evals)
+        return min_eig >= tol, min_eig
+
+    def optimize_moments_psd(self, n_moments=None, solver="SCS", verbose=False, psd_tol=1e-9, **kwargs):
+        """
+        Find the closest moment vector that forms a PSD Hankel matrix using CVXPY.
+        
+        psd_tol: Enforce eigenvalues >= psd_tol to ensure strict positivity despite numerical errors.
+        """
+        if n_moments is None:
+            n_moments = len(self.moments)
+        
+        moments_orig = self.moments[:n_moments]
+        
+        # Determine size of Hankel matrix
+        max_index = n_moments - 1
+        n = max_index // 2
+        k = 2 * n + 1
+        m_subset = moments_orig[:k]
+        
+        # Define CVXPY variable for moments
+        m = cp.Variable(k)
+        
+        # Construct Hankel matrix
+        # H[i, j] = m[i+j]
+        # Size is (n+1) x (n+1)
+        rows = []
+        for i in range(n + 1):
+            # Row i contains m[i], m[i+1], ..., m[i+n]
+            rows.append(cp.reshape(m[i : i+n+1], (1, n+1)))
+            
+        H = cp.vstack(rows)
+        
+        # Objective: minimize L2 distance
+        objective = cp.Minimize(cp.sum_squares(m - m_subset))
+        
+        # Constraint: H is PSD with a safety margin
+        constraints = [H >> 0]
+        
+        prob = cp.Problem(objective, constraints)
+        
+        # Default solver options for higher precision
+        solve_args = {"solver": solver, "verbose": verbose}
+        if solver == "SCS":
+            # Use tighter tolerance than default (1e-4/1e-5)
+            if "eps" not in kwargs:
+                solve_args["eps"] = 1e-8
+            if "max_iters" not in kwargs:
+                solve_args["max_iters"] = 50000
+        
+        solve_args.update(kwargs)
+
+        try:
+            prob.solve(**solve_args)
+        except Exception as e:
+            print(f"CVXPY optimization failed with solver {solver}: {e}")
+            return m_subset
+
+        if prob.status in ["optimal", "optimal_inaccurate"]:
+            return m.value
+        else:
+            print(f"Optimization failed. Status: {prob.status}")
+            return m_subset
+
     def get_exact_ovlp(self, b_list, b_list_len_eig=None):
         """Return the exact (linear combination of) overlap defined by the b_list"""
         if self.custom_constraints is not None:
@@ -726,9 +821,7 @@ class PolyBounds_SIP:
         if O_exact is not None:
             print("Exact overlap:", O_exact)
 
-    def optimize(self, intervals, lower_coefs_list, solver="SCS", verbose=False, global_bnd=None, solver_max_iters=None, poly_degrees=None, visualize=False, use_cheb=True, initial_guesses=None, inherit_from_last=False, **kwargs):
-        import cvxpy as cp
-
+    def optimize(self, intervals, lower_coefs_list, solver="SCS", verbose=False, global_bnd=None, solver_max_iters=None, poly_degrees=None, visualize=False, use_cheb=True, initial_guesses=None, inherit_from_last=False, restrict_to_0_1=False, **kwargs):
         if len(lower_coefs_list) != len(intervals):
             raise ValueError("lower_coefs_list must have the same length as intervals.")
         if poly_degrees is None:
@@ -749,12 +842,14 @@ class PolyBounds_SIP:
             if solver == "MOSEK":
                 solve_kwargs["mosek_params"] = {
                     "MSK_IPAR_INTPNT_MAX_ITERATIONS": int(solver_max_iters),
-                    "MSK_DPAR_INTPNT_TOL_PFEAS": 1e-7,
-                    "MSK_DPAR_INTPNT_TOL_DFEAS": 1e-7,
-                    "MSK_DPAR_INTPNT_TOL_MU_RED": 1e-7
+                    # "MSK_IPAR_OPTIMIZER": mosek.optimizertype.free_simplex,
+                    # "MSK_DPAR_INTPNT_TOL_PFEAS": 1e-7,
+                    # "MSK_DPAR_INTPNT_TOL_DFEAS": 1e-7,
+                    # "MSK_DPAR_INTPNT_TOL_MU_RED": 1e-7
                 }
-            else:
+            elif solver == "SCS":
                 solve_kwargs['max_iters'] = int(solver_max_iters)
+                solve_kwargs['warm_start'] = kwargs.get('warm_start', False)
 
         # small regularizer for Gram matrices
         gram_eps = float(kwargs.get("gram_eps", 1e-9))
@@ -922,8 +1017,11 @@ class PolyBounds_SIP:
             if global_bnd is not None:
                 cons_LB.append(c_LB <= global_bnd)
                 cons_LB.append(c_LB >= -global_bnd)
+            if restrict_to_0_1:
+                cons_LB.append(M @ c_LB >= 0)
+                cons_LB.append(M @ c_LB <= 1)
             prob_LB = cp.Problem(cp.Maximize(M @ c_LB), cons_LB)
-            prob_LB.solve(solver=solver, verbose=verbose, warm_start=True, **solve_kwargs)
+            prob_LB.solve(solver=solver, verbose=verbose, **solve_kwargs)
             c_LB_val = np.array([ci.value for ci in c_LB]) if all(ci.value is not None for ci in c_LB) else None
             LB_val = float(M @ c_LB_val) if c_LB_val is not None else None
 
@@ -938,8 +1036,11 @@ class PolyBounds_SIP:
             if global_bnd is not None:
                 cons_UB.append(c_UB <= global_bnd)
                 cons_UB.append(c_UB >= -global_bnd)
+            if restrict_to_0_1:
+                cons_UB.append(M @ c_UB >= 0)
+                cons_UB.append(M @ c_UB <= 1)
             prob_UB = cp.Problem(cp.Minimize(M @ c_UB), cons_UB)
-            prob_UB.solve(solver=solver, verbose=verbose, warm_start=True, **solve_kwargs)
+            prob_UB.solve(solver=solver, verbose=verbose, **solve_kwargs)
             c_UB_val = np.array([ci.value for ci in c_UB]) if all(ci.value is not None for ci in c_UB) else None
             UB_val = float(M @ c_UB_val) if c_UB_val is not None else None
 
@@ -982,8 +1083,6 @@ class PolyBounds_SIP:
             # plotting (convert cheb -> power for display)
             save_plots = bool(kwargs.get('save_plots', False))
             save_dir = kwargs.get('save_dir', None)
-            mode_name = kwargs.get('mode', None)
-            show_plot = bool(kwargs.get('show', visualize))
             if visualize or save_plots:
                 base_title = kwargs.get("plot_title", "")
                 title = (base_title + " ").rstrip()
@@ -1007,25 +1106,20 @@ class PolyBounds_SIP:
                     intervals,
                     deg,
                     lower_coefs_list,
-                    n_plot_points=kwargs.get("n_plot_points", 1000),
                     title=title,
-                    show_spectrum=kwargs.get("show_spectrum", False),
                     linewidth=kwargs.get("linewidth", 1),
-                    exact_energies=kwargs.get("exact_energies"),
-                    exact_overlaps=kwargs.get("exact_overlaps"),
                     c_LB=c_LB_plot,
                     c_UB=c_UB_plot,
                     bounds=summary.get("bounds"),
                     method="sos",
-                    show=show_plot,
                     save_path=save_path,
-                    mode=mode_name,
+                    **kwargs
                 )
         return summaries
 
 
 
-    def plot_results(self, intervals, poly_degree=None, lower_coefs_list=None, n_plot_points=1000, linewidth=2, title=None, show_spectrum=False, show=True, save_path=None, legend_anchor=(1,0.2), show_constraint_points=False, plot_chebyshev=False, constraint_recipe_obj=None, truncate_lower=None, **kwargs):
+    def plot_results(self, intervals, poly_degree=None, lower_coefs_list=None, n_plot_points=1000, linewidth=2, title=None, show_spectrum=False, save_path=None, legend_anchor=(1,0.2), show_constraint_points=False, plot_chebyshev=False, constraint_recipe_obj=None, truncate_lower=None, **kwargs):
         """
         Plot optimized polynomials and constraint functions using the same style as PolyBounds_new.plot_results.
         Accepts `show` and `save_path` to control display and saving.
@@ -1121,7 +1215,7 @@ class PolyBounds_SIP:
                 fig.savefig(save_path)
 
         # Show if requested
-        if show:
+        if kwargs.get('show', False):
             plt.show()
         plt.close(fig)
     
@@ -1233,7 +1327,8 @@ class OverlapEstimator:
             has_moments = any([
                 recipe.get("moments") is not None,
                 recipe.get("moments_file") is not None,
-                self.moments is not None
+                recipe.get("eig_results") is not None,
+                self.moments is not None,
             ])
             if not has_moments:
                 raise ValueError("moments must be provided inline, via moments_file, or at initialization for manual mode.")
@@ -1257,6 +1352,10 @@ class OverlapEstimator:
                 payload = self._compute_below_mode(mode_recipe, poly_degrees, visualize=visualize, save_plots=save_plots, save_dir=save_dir, mode=mode)
             all_payloads.append(payload)
         self.last_results = all_payloads[-1] if all_payloads else None
+        if save_dir:
+            # os.makedirs(save_dir, exist_ok=True)
+            json_path = os.path.join(save_dir, "all_payloads.json")
+            self.save_results(all_payloads, json_path, fmt='json')
         return all_payloads if len(all_payloads) > 1 else all_payloads[0]
 
     def distill_results(self, results):
@@ -1353,7 +1452,7 @@ class OverlapEstimator:
 
         raise ValueError(f"Unsupported format: {fmt}")
 
-    def plot_bounds(self, results=None, show=True, output_file_path=None, **kwargs):
+    def plot_bounds(self, results=None, output_file_path=None, **kwargs):
         """Visualize bounds computed by compute_bounds().
 
         If results is None, uses `self.last_results`.
@@ -1361,7 +1460,7 @@ class OverlapEstimator:
         payloads = results if results is not None else (self.last_results if self.last_results is not None else None)
         if payloads is None:
             raise ValueError("No results available to plot. Run compute_bounds() first or pass results explicitly.")
-        viz.plot_bounds(payloads, show=show, save_path=output_file_path, **kwargs)
+        viz.plot_bounds(payloads, save_path=output_file_path, **kwargs)
 
     def _normalize_poly_degrees(self, recipe: dict):
         degrees = recipe.get("poly_degrees")
@@ -1455,20 +1554,25 @@ class OverlapEstimator:
             return np.array(self.moments, dtype=float)
         raise ValueError("moments must be provided either directly, via moments_file, or during initialization.")
 
+    def _get_constraint_info(self, recipe, eig_results, target_indices, use_exact_energies=True, **kwargs):
+        return PB_linprog_params_from_eig(
+            eig_results,
+            target_indices=target_indices,
+            use_exact_energies=use_exact_energies,
+            use_all_evals=kwargs.get("use_all_evals", recipe.get("use_all_evals", False)),
+            custom_constraints=kwargs.get("custom_constraints", recipe.get("custom_constraints")),
+            use_cheb=kwargs.get("use_cheb", recipe.get("use_cheb", True)),
+            rescale=kwargs.get("rescale", recipe.get("rescale", True)),
+            bound_extension=kwargs.get("bound_extension", recipe.get("bound_extension")),
+            dense_info=kwargs.get("dense_info", tuple(recipe.get("dense_info", (None, None)))),
+            Energy_constraint_limits=kwargs.get("energy_constraint_limits", recipe.get("energy_constraint_limits", (float('-inf'), float('inf'))))
+        )
+
     def _compute_exact_mode(self, recipe: dict, poly_degrees, visualize:bool=False, **kwargs):
         eig_results = self._load_eig_results(recipe)
         target_indices = recipe["target_indices"]
         b_values = recipe["b_values"]
-        constraint_info = PB_linprog_params_from_eig(
-            eig_results,
-            target_indices=target_indices,
-            use_exact_energies=True,
-            use_all_evals=recipe.get("use_all_evals", False),
-            custom_constraints=recipe.get("custom_constraints"),
-            use_cheb=recipe.get("use_cheb", True),
-            rescale=recipe.get("rescale", True),
-            Energy_constraint_limits=recipe.get("energy_constraint_limits", (float('-inf'), float('inf')))
-        )
+        constraint_info = self._get_constraint_info(recipe, eig_results, target_indices)
         max_degree = poly_degrees[-1]
         if max_degree > constraint_info.max_poly_degree:
             raise ValueError("Requested polynomial degree exceeds available moments.")
@@ -1518,19 +1622,7 @@ class OverlapEstimator:
         bound_extension = recipe.get("bound_extension")
         if bound_extension is None:
             raise ValueError("bound_extension must be provided for approx mode.")
-        dense_info = tuple(recipe.get("dense_info", (None, None)))
-        constraint_info = PB_linprog_params_from_eig(
-            eig_results,
-            target_indices=target_indices,
-            use_exact_energies=True,
-            use_all_evals=recipe.get("use_all_evals", False),
-            custom_constraints=recipe.get("custom_constraints"),
-            use_cheb=recipe.get("use_cheb", True),
-            rescale=recipe.get("rescale", True),
-            bound_extension=bound_extension,
-            dense_info=dense_info,
-            Energy_constraint_limits=recipe.get("energy_constraint_limits", (float('-inf'), float('inf')))
-        )
+        constraint_info = self._get_constraint_info(recipe, eig_results, target_indices)
         max_degree = poly_degrees[-1]
         if max_degree > constraint_info.max_poly_degree:
             raise ValueError("Requested polynomial degree exceeds available moments.")
@@ -1549,21 +1641,17 @@ class OverlapEstimator:
                     c_LB = self.exact_mode_coeffs[deg]['c_LB']
                     c_UB = self.exact_mode_coeffs[deg]['c_UB']
                     initial_guesses[deg] = {'c_LB': c_LB, 'c_UB': c_UB}
+        
+        recipe_for_opt = {k: v for k, v in recipe.items() if k != "intervals"}
         solver_output = sip.optimize(
             intervals,
             region_b_list,
-            solver=recipe.get("solver", "SCS"),
-            verbose=recipe.get("verbose", False),
-            global_bnd=recipe.get("global_bound"),
-            solver_max_iters=recipe.get("solver_max_iters"),
             poly_degrees=poly_degrees,
             visualize=visualize,
-            use_cheb=recipe.get("use_cheb", True),
             initial_guesses=initial_guesses,
             plot_title = "Approx Mode",
-            save_plots=kwargs.get('save_plots', False),
-            save_dir=kwargs.get('save_dir', None),
-            mode=kwargs.get('mode', None),
+            **recipe_for_opt,
+            **kwargs
         )
         
         # Store optimal coefficients
@@ -1588,7 +1676,16 @@ class OverlapEstimator:
         }
 
     def _compute_manual_mode(self, recipe: dict, poly_degrees, visualize:bool=False, **kwargs):
-        manual_moments = self._load_manual_moments(recipe)
+        exact_overlap = None
+        if recipe.get('eig_results') is not None:
+            eig_results = self._load_eig_results(recipe)
+            if eig_results.get('moments') is not None:
+                manual_moments = np.array(eig_results['moments'], dtype=float)
+            if eig_results.get('exact_overlap') is not None:
+                exact_overlap = np.array(eig_results['exact_overlap'], dtype=float)
+                print(f"exact_overlap {exact_overlap} found for manual mode: double-check the meaning!")
+        else:
+            manual_moments = self._load_manual_moments(recipe)
         max_available = len(manual_moments) - 1
         max_degree = poly_degrees[-1]
         if max_degree > max_available:
@@ -1617,21 +1714,13 @@ class OverlapEstimator:
                     c_UB = self.exact_mode_coeffs[deg]['c_UB']
                     initial_guesses[deg] = {'c_LB': c_LB, 'c_UB': c_UB}
 
+        recipe_without_intervals = {k: v for k, v in recipe.items() if k != "intervals"}
         solver_output = sip.optimize(
             intervals,
             lower_coefs_list,
-            solver=recipe.get("solver", "SCS"),
-            verbose=recipe.get("verbose", False),
-            global_bnd=recipe.get("global_bound"),
-            solver_max_iters=recipe.get("solver_max_iters"),
-            poly_degrees=poly_degrees,
-            visualize=visualize,
-            use_cheb=recipe.get("use_cheb", True),
             initial_guesses=initial_guesses,
             plot_title = "Manual Mode",
-            save_plots=kwargs.get('save_plots', False),
-            save_dir=kwargs.get('save_dir', None),
-            mode=kwargs.get('mode', None),
+            **recipe_without_intervals
         )
         
         # Store optimal coefficients
@@ -1651,7 +1740,8 @@ class OverlapEstimator:
             "degree_results": summary,
             "intervals": intervals,
             "raw_solver_output": solver_output,
-            "poly_degrees": list(poly_degrees)
+            "poly_degrees": list(poly_degrees),
+            "exact_overlap": exact_overlap
         }
     
     def _compute_below_mode(self, recipe: dict, poly_degrees, visualize:bool=False, **kwargs):
@@ -1669,16 +1759,7 @@ class OverlapEstimator:
         exact_energies = eig_results['exact_energies_no_degen']
         target_indices = [i for i, e in enumerate(exact_energies) if e < energy_threshold]
         
-        constraint_info = PB_linprog_params_from_eig(
-            eig_results,
-            target_indices=target_indices,
-            use_exact_energies=True,
-            use_all_evals=True,
-            custom_constraints=recipe.get("custom_constraints"),
-            use_cheb=recipe.get("use_cheb", True),
-            rescale=recipe.get("rescale", True),
-            Energy_constraint_limits=recipe.get("energy_constraint_limits", (float('-inf'), float('inf')))
-        )
+        constraint_info = self._get_constraint_info(recipe, eig_results, target_indices, use_all_evals=True)
         
         max_degree = poly_degrees[-1]
         if max_degree > constraint_info.max_poly_degree:
@@ -1706,20 +1787,15 @@ class OverlapEstimator:
         
         sip = PolyBounds_SIP(values, poly_degree=max_degree, O_exact=exact_overlap)
         
+        recipe_for_opt = {k: v for k, v in recipe.items() if k != "intervals"}
         solver_output = sip.optimize(
             intervals,
             region_b_list,
-            solver=recipe.get("solver", "SCS"),
-            verbose=recipe.get("verbose", False),
-            global_bnd=recipe.get("global_bound"),
-            solver_max_iters=recipe.get("solver_max_iters", 1e6),
             poly_degrees=poly_degrees,
             visualize=visualize,
-            use_cheb=recipe.get("use_cheb", True),
             plot_title = "Below Mode",
-            save_plots=kwargs.get('save_plots', False),
-            save_dir=kwargs.get('save_dir', None),
-            mode=kwargs.get('mode', None),
+            **recipe_for_opt,
+            **kwargs
         )
         
         summary = self._format_solver_output(solver_output, poly_degrees)
