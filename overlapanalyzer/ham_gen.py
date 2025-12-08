@@ -72,7 +72,7 @@ def gen_ham_h_chain(num_hydrogen, R10, basis='sto-3g'):
     ensure_directory_exists(directory_name+'/ham_fer')
     save_operator(h_ferm,file_name=mol_name+f'_{R10/10}', data_directory=directory_name+'/ham_fer', allow_overwrite=True, plain_text=True)
 
-def gen_hamiltonian(fileDir, mol_name, mode, small_atom_basis, **kwargs):
+def gen_hamiltonian(fileDir, mol_name, mode, small_atom_basis='sto-3g', **kwargs):
     if mode == "from_MD":
         print("Loading molecular structure from molecular data.")
         geo = get_molecular_data(mol_name, kwargs.get('R10')/10, xyz_format=False)
@@ -173,4 +173,6 @@ def gen_hamiltonian(fileDir, mol_name, mode, small_atom_basis, **kwargs):
     return hf_energy
 
 if __name__ == "__main__":
-    current_dir = os.path.dirname(__file__)
+    target_dir = '/Users/junan/Documents/Research/Overlap/ham_dir'
+    hf_energy = gen_hamiltonian(target_dir, mol_name='h2o', mode='from_MD', R10=21, create_CAS=True, spin='s0', n_elec=8, n_spin_orbs=12)
+    print("HF energy: ", hf_energy)
