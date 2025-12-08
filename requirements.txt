@@ -4,7 +4,6 @@ openfermionpyscf
 numpy
 openfermion
 pathos
-PennyLane
 scipy
 sympy
 argparse

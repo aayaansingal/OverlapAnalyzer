@@ -4,10 +4,8 @@ openfermionpyscf
 numpy
 openfermion
 pathos
-PennyLane
 scipy
 sympy
 argparse
 matplotlib
 qulacs
-krypy
