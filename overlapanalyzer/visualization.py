@@ -282,7 +282,7 @@ def plot_Bounds_vs_PolyDeg(data):
             # ...existing code for single axis when 'Eckart' not present...
             fig, ax1 = plt.subplots()
             x_data = np.array([i for i in range(2, len(data[key]['Overlap_LBs'])+2)])
-            ax1.plot(x_data, data[key]['Overlap_LBs'], marker='.', linestyle=':', color='red', label='Lower Bound')
+            ax1.plot(x_data, data[key]['Overlap_LBs'], marker='.', linestyle=':', color='green', label='Lower Bound')
             ax1.plot(x_data, data[key]['Overlap_UBs'], marker='v', linestyle=':', color='red', label='Upper Bound')
             if 'exact_overlap' in data[key]:
                 ax1.axhline(y=data[key]['exact_overlap'], linestyle='-', color='blue', label=r'$P_{exact}$')
@@ -324,6 +324,144 @@ def plot_Bounds_vs_PolyDeg_Multi(data_dict_list, exactCons_data_dict_list, MaxDe
             # plt.title(molname + f', R = {key}')
     plt.tight_layout()
     plt.show()
+
+
+def plot_bounds_payload(payload, ax=None, title=None, color=None, update_limits=True, **kwargs):
+    """Plot lower/upper polynomial bounds for a single payload returned by OverlapEstimator.compute_bounds().
+
+    payload: dict with keys 'mode', 'degree_results' (list of {'degree','lower','upper'}) and optional 'exact_overlap'.
+    """
+    import numpy as _np
+    if ax is None:
+        fig, ax = plt.subplots()
+    degrees = []
+    lowers = []
+    uppers = []
+    deg_results = payload.get('degree_results', [])
+    # degree_results may be list of dicts or formatted differently
+    for entry in deg_results:
+        if isinstance(entry, dict):
+            degrees.append(entry.get('degree'))
+            lowers.append(entry.get('lower'))
+            uppers.append(entry.get('upper'))
+    if not degrees:
+        return ax
+    degrees = _np.array(degrees)
+    lowers = _np.array(lowers)
+    uppers = _np.array(uppers)
+
+    if kwargs.get('show_monotonic', False):
+        # Monotonic Lower Bounds
+        eff_lowers = []
+        curr_lb = -float('inf')
+        for val in lowers:
+            if val is not None and not _np.isnan(val):
+                if val > curr_lb:
+                    curr_lb = val
+            eff_lowers.append(curr_lb if curr_lb != -float('inf') else _np.nan)
+        lowers = _np.array(eff_lowers)
+
+        # Monotonic Upper Bounds
+        eff_uppers = []
+        curr_ub = float('inf')
+        for val in uppers:
+            if val is not None and not _np.isnan(val):
+                if val < curr_ub:
+                    curr_ub = val
+            eff_uppers.append(curr_ub if curr_ub != float('inf') else _np.nan)
+        uppers = _np.array(eff_uppers)
+
+    lbl = payload.get('mode', 'bounds')
+    c = color or None
+    ax.plot(degrees, lowers, marker='.', linestyle=':', label=f'{lbl} LB', color=c)
+    ax.plot(degrees, uppers, marker='*', linestyle='--', label=f'{lbl} UB', color=c)
+    if 'exact_overlap' in payload:
+        ax.axhline(y=payload['exact_overlap'], color='blue', linestyle='-', linewidth=1, label=f"{lbl} exact")
+    if title:
+        ax.set_title(title)
+    # ax.set_xlabel('Polynomial degree')
+    # ax.set_ylabel('Overlap')
+    
+    if update_limits:
+        ax.set_ylim(-0.05, 1.05)
+        ax.set_yticks([0.0, 0.5, 1.0])
+        ax.set_xlim(0, max(degrees)+1)
+        if kwargs.get('x_spacing', False):
+            ax.set_xticks([i for i in range(0, max(degrees)+2, kwargs.get('x_spacing', 3))])
+    # ax.legend()
+    return ax
+
+
+def plot_bounds(results, save_path=None, figsize=None, max_deg=None, **kwargs):
+    """Plot one or many payloads produced by OverlapEstimator.compute_bounds().
+
+    results: single payload dict or list of payload dicts.
+    If `save_path` is provided, the figure will be saved to that path.
+    Optional `figsize` (width, height) can be provided to control figure size.
+    """
+    if results is None:
+        raise ValueError("No results provided to plot_bounds().")
+    if not isinstance(results, (list, tuple)):
+        payloads = [results]
+    else:
+        payloads = list(results)
+    # create figure with optional custom size
+    if figsize is not None:
+        fig, ax = plt.subplots(figsize=figsize)
+    else:
+        fig, ax = plt.subplots()
+    # colors = plt.rcParams.get('axes.prop_cycle').by_key().get('color', [])
+    colors = ['red', 'green']
+    
+    global_max_degree = 0
+    for i, p in enumerate(payloads):
+        # Track max degree
+        deg_results = p.get('degree_results', [])
+        current_max = 0
+        for entry in deg_results:
+            if isinstance(entry, dict):
+                d = entry.get('degree')
+                if d is not None and d > current_max:
+                    current_max = d
+        if current_max > global_max_degree:
+            global_max_degree = current_max
+
+        c = colors[i % len(colors)] if colors else None
+        plot_bounds_payload(p, ax=ax, title=None, color=c, update_limits=False, **kwargs)
+        
+    # Determine effective max degree for plotting
+    final_max_degree = global_max_degree
+    if max_deg is not None and max_deg < global_max_degree:
+        final_max_degree = max_deg
+
+    # Set global limits
+    ax.set_ylim(-0.05, 1.05)
+    ax.set_yticks([0.0, 0.5, 1.0])
+    ax.set_xlim(0, final_max_degree+1)
+    if kwargs.get('x_spacing', False):
+        ax.set_xticks([i for i in range(0, final_max_degree+2, kwargs.get('x_spacing', 3))])
+
+    if kwargs.get('include_title', False):
+        fig.suptitle('Overlap bounds vs polynomial degree')
+    if kwargs.get('include_label', True):
+        labels_str = kwargs.get('ylabel', '0')
+        if labels_str == '0':
+            plt.ylabel(r'$P_0$')
+        elif labels_str == '1':
+            plt.ylabel(r'$P_1$')
+        elif labels_str == '1+2':
+            plt.ylabel(r'$P_1 + P_2$')
+        elif labels_str == 'below':
+            plt.ylabel(r'$P_{<}$')
+        else:
+            plt.ylabel(f'$P_{{{labels_str}}}$')
+    fig.subplots_adjust(left=kwargs.get('plot_left_adjust', 0.1))
+    plt.tight_layout()
+    if save_path:
+        fig.savefig(save_path)
+    if kwargs.get('show', True):
+        plt.show()
+    plt.close(fig)
 
 def plot_inaccuracy_vs_LB(data):
     for i, key in enumerate(data.keys()):
