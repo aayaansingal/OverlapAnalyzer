@@ -576,9 +576,3 @@ def residue_vector(v, basis):
     proj = projection(v, basis)
     return v - proj
 
-
-if __name__ == '__main__':
-    import numpy as np
-    # print(vecs_in_subspace(np.array([[2,1,3],[4,0,1],[3,5,2]]), [2,1], 1))
-    # print(evals_no_degen([5,5,3,1,1], [2,1,2]))
-    print(select_right_multiplicity([1,2,3,4,5,6,7],[1,3,3,1,3,1,1], 1))
