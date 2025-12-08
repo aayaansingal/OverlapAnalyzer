@@ -4,6 +4,7 @@ hamiltonian_all/
 hamiltonian_useful/
 test_hams/
 test_scripts/
+tests/
 tutorials/
 .vscode/
 *.ipynb
