@@ -215,14 +215,14 @@ How the runner stays reliable:
 - **Reference energies:** HF and FCI energies match the Psi4 reference data shipped with OpenFermion to 10⁻⁶ Ha: H₂/STO-3G at five bond lengths, H₂/6-31G, and LiH/STO-3G.
 - **Reference overlaps:** ground-state energies and |⟨HF|ground⟩|² match PySCF FCI/CASCI wavefunctions to 10⁻⁸ for dissociated H₂, linear and square H₄, HeH⁺, and active-space BeH₂, H₂O and N₂.
 - **Bound properties:** on random synthetic spectra, bounds contain the exact value for every target position, and exact-mode bounds tighten monotonically with degree.
-- **Reliability:** cache invalidation, recovery from corrupted caches, locking, worker-crash recovery, agreement between parallel and sequential runs, Ctrl-C and resume through the real command line, and exit codes. Exact-mode (LP) results must reproduce exactly; SDP results must agree within solver tolerance whenever the solver reports `optimal`.
+- **Reliability:** cache invalidation, recovery from corrupted caches, locking, worker-crash recovery, agreement between parallel and sequential runs, Ctrl-C and resume through the real command line, and exit codes. Exact-mode (LP) results must reproduce exactly between runs. The published validation numbers were produced on macOS.
 - **Self-checks in every result:** the moment identity Σᵢ|⟨ψ|i⟩|²Eᵢᵏ = mₖ, the reference ⟨S²⟩ versus its spin label, solver status, and whether each bound contains the exact value. These checks found the `s1` and `approx`-mode bugs.
 
 ## Limitations
 
 - **Small systems only:** diagonalization is dense, so systems are limited to a few thousand determinants (`limits.max_dimension`). Larger molecules need an active space, and choosing one is a scientific decision. Validated systems go up to 924 determinants.
 - **Exact values come from diagonalization:** they serve as a reference for the bounds. In a real use case the moments would come from elsewhere, for example tensor networks, as in the paper.
-- **SCS accuracy at high degree:** at high polynomial degree, SCS can return `optimal_inaccurate`, and such bounds are not guaranteed valid. Such non-converged solves can also vary between runs on multithreaded BLAS (observed on Linux CI). These cases are flagged in `bounds.csv` and `warnings`. Use lower degrees, or MOSEK (licensed; not tested here).
+- **SCS accuracy at high degree:** at high polynomial degree, SCS can return `optimal_inaccurate`, and such bounds are not guaranteed valid. These cases are flagged in `bounds.csv` and `warnings`. Separately, on Linux CI (multithreaded OpenBLAS), repeating the same SCS solve gave values up to 0.03 apart even when reported `optimal` (stretched H₄, degree 8); on macOS the same solves were deterministic. Treat `approx`/`below` bounds from SCS as accurate to about 10⁻² unless confirmed, for example with tighter solver tolerances or MOSEK (licensed; not tested here). `exact`-mode (LP) results reproduced exactly on both platforms.
 - **Untested routes:** the `ham_gen` route (needs `qcc_240202`) and licensed MOSEK. Odd-electron molecules need a doublet reference, which `calc_eigen` does not provide.
 - **Legacy modules:** the Krylov, contour-integration, iQCC and partitioning modules of the original code are kept as they were and are not covered by the tests.
 
