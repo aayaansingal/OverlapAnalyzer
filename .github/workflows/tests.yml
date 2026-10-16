@@ -12,8 +12,8 @@ jobs:
       matrix:
         python-version: ["3.11", "3.13"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -22,4 +22,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
       - name: Run tests
-        run: python -m pytest tests/ -q
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest tests/ -q -rfE --tb=short 2>&1 | tee pytest.log
+      - name: Report failing tests
+        if: failure()
+        shell: bash
+        run: |
+          # One annotation per failing test, visible on the run page without downloading logs
+          grep -E "^(FAILED|ERROR) " pytest.log | head -10 | while read -r line; do echo "::error::${line}"; done
+          { echo '```'; tail -n 120 pytest.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
