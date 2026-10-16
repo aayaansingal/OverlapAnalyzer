@@ -14,6 +14,8 @@ New:
 Fixed:
 - `OverlapEstimator` crashed in `approx` and `below` modes (duplicate keyword arguments).
 - `below` mode bounded the overlap *above* the energy threshold instead of below it (flipped energy rescaling).
+- `approx` mode bounded the wrong region (or crashed) when the target level was not among the lowest two levels: target level indices were used as region indices after non-target levels were merged (`process_bound_pairs`).
+- `calc_eigen`'s `s1` (open-shell singlet) reference was actually the Sz = 0 triplet (sign error in the two-determinant combination).
 - `ham_gen` used RHF instead of ROHF for triplet active-space runs.
 - Plotting crashed when no LaTeX installation was present.
 - `krypy`, which fails to import on current SciPy, no longer breaks unrelated modules.
@@ -80,8 +82,13 @@ How it works:
 - Target selection is automatic: `lowest_with_overlap` (default), `max_overlap`, `index`, or `lowest_in_sector`, which picks the lowest level whose spin matches the reference, even if the true ground state is in another spin sector.
 - Bounds come from `OverlapEstimator` in `exact`, `approx` and `below` modes. Each mode runs separately, so one solver failure does not lose the others.
 - `result.json` keeps three things separate: **exact** quantities from diagonalization (energies, overlaps, spin, gaps), **bounds** (estimates from Hamiltonian moments, each stored next to the exact value it bounds plus a `brackets_exact` check), and timings.
-- A failed experiment is recorded with its error and the sweep continues. An interrupted sweep (Ctrl-C) resumes from the first unfinished stage. Results are identified by a hash of their parameters, so changed parameters are recomputed and unchanged ones are reused.
-- Outputs go to `sweeps/<sweep_name>/` by default (gitignored): `results.csv` (one row per experiment), `bounds.csv` (one row per mode and polynomial degree), `results.jsonl`, and per-system folders with logs.
+- Every result carries built-in checks. Two exact identities are verified: Hamiltonian moments versus spectrum (Σ overlap·Eᵏ = ⟨Hᵏ⟩), and the reference's ⟨S²⟩ versus its spin label. The run also notes when solver status is not `optimal` (e.g. SCS `optimal_inaccurate`), and whether each bound actually contains the exact value. Problems are listed in `warnings` (and in `results.csv`) without failing the experiment.
+- A failed experiment is recorded with its error and the sweep continues. An interrupted sweep (Ctrl-C, also with `--jobs`) resumes from the first unfinished stage. If a parallel worker dies (e.g. out of memory), finished results are kept, the systems that were running are marked failed (`--retry-failed`), and systems that never started stay pending.
+- Results are identified by a hash of their parameters, so changed parameters are recomputed and unchanged ones are reused. Each cached stage also records which code version and which upstream computation produced it. After a code fix, or a forced recompute (`--force`), affected results show as `stale` in `overlap-sweep status` and are recomputed on the next run.
+- One `run` at a time per output directory: a lock file prevents two sweeps from writing the same results (exit code 3). With `--jobs N`, each worker gets an equal share of CPU threads.
+- Outputs go to `sweeps/<sweep_name>/` by default (gitignored): `results.csv` (one row per experiment), `bounds.csv` (one row per mode and polynomial degree, with solver status), `results.jsonl`, and per-system folders with logs.
 - `limits.max_dimension` (default 6000) refuses dense diagonalizations that would be too large; use an active space for bigger molecules.
 
-Tests: `.venv/bin/python -m pytest tests/`.
+Exit codes: 0 everything complete, 1 failures or unfinished work, 2 invalid config, 3 output directory in use, 130 interrupted.
+
+Tests: `.venv/bin/python -m pytest tests/` (about 30 s). They check energies against Psi4 reference data shipped with OpenFermion and overlaps against PySCF FCI/CASCI wavefunctions. They also cover bound validity and monotonicity on random spectra, caching and invalidation, locking, crash recovery, parallel determinism, and interrupt/resume through the real CLI. `examples/sweeps/validation_suite.json` is a broader end-to-end check across molecules, spins, active spaces and bound modes.

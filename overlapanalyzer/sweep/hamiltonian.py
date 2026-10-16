@@ -73,6 +73,13 @@ def file_safe_molecule_name(system) -> str:
     return system.molecule
 
 
+def remove_if_present(path: str) -> None:
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
+
+
 def reference_multiplicity(spin_label: str) -> int:
     # 't1' references are built from ROHF orbitals of the triplet; 's0' and 's1' from RHF orbitals (as in ham_gen)
     return 3 if spin_label == "t1" else 1
@@ -134,6 +141,8 @@ def generate_with_pyscf(system, system_dir: str) -> HamiltonianInfo:
     save_operator(get_fermion_operator(interaction_operator), file_name=hamiltonian_file,
                   data_directory=ham_dir, allow_overwrite=True, plain_text=True)
     write_info_csv(system_dir, uses_active_space, n_electrons, n_spin_orbitals)
+    # run_pyscf caches all molecular integrals in an HDF5 file (O(N^4) in orbitals); nothing reads it again
+    remove_if_present(molecule.filename + ".hdf5")
 
     return HamiltonianInfo(
         mol_name=mol_name, geometry_label=geometry_label, n_electrons=n_electrons,

@@ -1,0 +1,32 @@
+{
+  "sweep_name": "validation_suite",
+  "description": "Broad end-to-end check: many molecules, all reference spins, active spaces, and every bound mode. Every result's built-in checks (moment consistency, reference spin, bound validity) should pass.",
+  "systems": [
+    {"molecule": "h2", "geometries": {"start": 0.5, "stop": 2.5, "num": 5}, "spin": ["s0", "t1", "s1"]},
+    {"molecule": "h_chain", "n_atoms": 4, "geometries": [1.0, 1.5, 2.0]},
+    {"molecule": "h_chain", "n_atoms": 6, "geometries": [1.0, 2.0]},
+    {"molecule": "h4", "geometries": [80, 90, 100]},
+    {"molecule": "lih", "geometries": [1.6, 3.0], "spin": ["s0", "t1"],
+     "active_space": {"active_electrons": 2, "active_spatial_orbitals": 5}},
+    {"molecule": "beh2", "geometries": [1.33, 2.0], "active_space": {"active_electrons": 4, "active_spatial_orbitals": 4}},
+    {"molecule": "h2o", "geometries": [0.96, 1.5], "active_space": {"active_electrons": 4, "active_spatial_orbitals": 4}},
+    {"molecule": "n2", "geometries": [1.1, 1.6], "active_space": {"active_electrons": 6, "active_spatial_orbitals": 6}},
+    {"name": "heh_cation", "atoms": [["He", [0, 0, 0]], ["H", [0, 0, 0.772]]], "charge": 1}
+  ],
+  "analyses": [
+    {
+      "name": "visible_ground",
+      "target": {"strategy": "lowest_with_overlap", "min_overlap": 1e-6},
+      "modes": ["exact", "approx", "below"],
+      "poly_degrees": [2, 4, 8, 12],
+      "bound_extension": 0.02,
+      "energy_threshold": "HF"
+    },
+    {
+      "name": "spin_sector_ground",
+      "target": {"strategy": "lowest_in_sector"},
+      "modes": ["exact"],
+      "poly_degrees": [4, 8]
+    }
+  ]
+}

@@ -7,7 +7,8 @@ Command-line interface for molecular parameter sweeps.
     python -m overlapanalyzer.sweep summarize CONFIG         # rebuild results.csv / bounds.csv / results.jsonl
 
 The same commands are available as `overlap-sweep ...` after `pip install -e .`.
-Exit codes: 0 all selected experiments complete, 1 some failed or pending, 2 invalid configuration, 130 interrupted.
+Exit codes: 0 all selected experiments complete, 1 some failed or pending, 2 invalid configuration,
+3 output directory in use by another sweep, 130 interrupted.
 """
 from __future__ import annotations
 
@@ -17,6 +18,7 @@ import sys
 
 from overlapanalyzer.sweep.config import ConfigError, load_sweep_config
 from overlapanalyzer.sweep.runner import plan_sweep, read_experiment_state, run_sweep, write_summaries
+from overlapanalyzer.sweep.storage import SweepLockedError
 
 
 def resolve_output_dir(config, cli_output_dir: str | None) -> str:
@@ -87,7 +89,11 @@ def command_run(config, output_dir: str, arguments) -> int:
     def report(outcome):
         progress["done"] += 1
         timing = f" ({outcome.seconds:.1f} s)" if outcome.seconds else ""
-        detail = f"  -> {outcome.message}" if outcome.state in ("failed", "cached-failed") and outcome.message else ""
+        detail = ""
+        if outcome.message and outcome.state in ("failed", "cached-failed", "not-run"):
+            detail = f"  -> {outcome.message}"
+        elif outcome.message and outcome.state == "complete":
+            detail = f"  (warning: {outcome.message})"
         print(f"[{progress['done']:>{len(str(total))}}/{total}] {outcome.state:<15} {outcome.label}{timing}{detail}", flush=True)
 
     try:
@@ -96,13 +102,19 @@ def command_run(config, output_dir: str, arguments) -> int:
     except KeyboardInterrupt:
         print("\nInterrupted. Completed experiments are saved; run the same command again to resume.")
         return 130
+    except SweepLockedError as exc:
+        print(f"Cannot run: {exc}", file=sys.stderr)
+        return 3
 
     failed = [outcome for outcome in outcomes if outcome.state in ("failed", "cached-failed")]
-    print(f"Done: {len(outcomes) - len(failed)} complete, {len(failed)} failed. "
-          f"Summaries: {os.path.join(output_dir, 'results.csv')}, {os.path.join(output_dir, 'bounds.csv')}")
+    not_run = [outcome for outcome in outcomes if outcome.state == "not-run"]
+    complete_count = len(outcomes) - len(failed) - len(not_run)
+    print(f"Done: {complete_count} complete, {len(failed)} failed"
+          + (f", {len(not_run)} not run (worker crash; rerun to compute)" if not_run else "")
+          + f". Summaries: {os.path.join(output_dir, 'results.csv')}, {os.path.join(output_dir, 'bounds.csv')}")
     if any(outcome.state == "cached-failed" for outcome in failed):
         print("Previously failed experiments were skipped; use --retry-failed to recompute them.")
-    return 1 if failed else 0
+    return 1 if failed or not_run else 0
 
 
 def main(argv=None) -> int:

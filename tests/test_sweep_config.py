@@ -56,6 +56,7 @@ def test_defaults_apply_and_duplicates_collapse():
     ({"systems": [{"molecule": "h_chain", "geometries": [1.0]}]}, "n_atoms"),
     ({"systems": [{"molecule": "h2", "geometries": [1.0], "spin": "q5"}]}, "spin"),
     ({"systems": [{"molecule": "h2"}]}, "needs 'geometries'"),
+    ({"systems": [{"molecule": "h2", "geometries": [0.0, 0.7]}]}, "must be positive"),
     ({"systems": [{"molecule": "h2", "geometries": [1.0], "active_space": {"active_electrons": 5, "active_spatial_orbitals": 2}}]}, "do not fit"),
     ({"analyses": [{"name": "a", "modes": ["approx"]}]}, "bound_extension"),
     ({"analyses": [{"name": "a", "modes": ["below"]}]}, "energy_threshold"),

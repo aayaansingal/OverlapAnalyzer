@@ -51,6 +51,59 @@ def reference_value(mode: str, payload: dict, target_overlap: float):
     return target_overlap
 
 
+def finite_or_none(value):
+    """Solvers report a missing bound as None (cvxpy) or NaN (linprog); normalise both to None."""
+    if value is None:
+        return None
+    value = float(value)
+    return value if np.isfinite(value) else None
+
+
+def solver_statuses(raw_entry: dict | None) -> dict:
+    """Solver status of the lower- and upper-bound problems: cvxpy status strings, or linprog success/message."""
+    statuses = {}
+    if not raw_entry:
+        return statuses
+    for side, problem_key, result_key in (("lower", "LB_problem", "LB_result"), ("upper", "UB_problem", "UB_result")):
+        problem = raw_entry.get(problem_key)
+        result = raw_entry.get(result_key)
+        if problem is not None and getattr(problem, "status", None) is not None:
+            statuses[side] = str(problem.status)                       # cvxpy: optimal, optimal_inaccurate, infeasible, ...
+        elif result is not None and hasattr(result, "success"):
+            statuses[side] = "optimal" if result.success else f"failed: {getattr(result, 'message', '')}".strip()
+    return statuses
+
+
+def summarize_degree_results(mode: str, payload: dict, exact_value) -> tuple[list, str]:
+    """
+    One row per polynomial degree with bounds, margins against the exact value, and solver status.
+    Returns the rows and the mode status: 'complete' (every degree bounded on both sides), 'partial', or 'no_solution'.
+    """
+    tolerance = BRACKET_TOLERANCE[mode]
+    raw_by_degree = {entry.get("degree"): entry for entry in payload.get("raw_solver_output") or [] if isinstance(entry, dict)}
+    rows = []
+    for entry in payload["degree_results"]:
+        degree = int(entry["degree"])
+        lower, upper = finite_or_none(entry.get("lower")), finite_or_none(entry.get("upper"))
+        row = {"degree": degree, "lower": lower, "upper": upper,
+               "width": (upper - lower) if lower is not None and upper is not None else None,
+               "solver_status": solver_statuses(raw_by_degree.get(degree))}
+        if exact_value is not None and lower is not None and upper is not None:
+            row["margin_lower"] = exact_value - lower    # >= 0 when the lower bound is valid
+            row["margin_upper"] = upper - exact_value    # >= 0 when the upper bound is valid
+            row["brackets_exact"] = bool(row["margin_lower"] >= -tolerance and row["margin_upper"] >= -tolerance)
+        rows.append(row)
+
+    bounded_rows = [row for row in rows if row["width"] is not None]
+    if rows and len(bounded_rows) == len(rows):
+        mode_status = "complete"
+    elif bounded_rows:
+        mode_status = "partial"
+    else:
+        mode_status = "no_solution"
+    return rows, mode_status
+
+
 def compute_mode_bounds(analysis, mode: str, eig_results: dict, target_truncated_index: int,
                         target_overlap: float, analysis_dir: str) -> dict:
     estimator = OverlapEstimator()
@@ -62,22 +115,13 @@ def compute_mode_bounds(analysis, mode: str, eig_results: dict, target_truncated
     estimator.save_results(payload, os.path.join(analysis_dir, f"bounds_{mode}.json"), fmt="json", distilled=True)
 
     exact_value = reference_value(mode, payload, target_overlap)
-    tolerance = BRACKET_TOLERANCE[mode]
-    degree_rows = []
-    for entry in payload["degree_results"]:
-        lower, upper = float(entry["lower"]), float(entry["upper"])
-        row = {"degree": int(entry["degree"]), "lower": lower, "upper": upper, "width": upper - lower}
-        if exact_value is not None and np.isfinite(lower) and np.isfinite(upper):
-            row["margin_lower"] = exact_value - lower    # >= 0 when the lower bound is valid
-            row["margin_upper"] = upper - exact_value    # >= 0 when the upper bound is valid
-            row["brackets_exact"] = bool(row["margin_lower"] >= -tolerance and row["margin_upper"] >= -tolerance)
-        degree_rows.append(row)
-
+    degree_rows, mode_status = summarize_degree_results(mode, payload, exact_value)
     mode_record = {
-        "status": "complete",
+        "status": mode_status,
         "description": MODE_DESCRIPTIONS[mode],
+        "solver": "scipy-highs" if mode == "exact" else analysis.solver,
         "exact_reference_value": exact_value,
-        "bracket_tolerance": tolerance,
+        "bracket_tolerance": BRACKET_TOLERANCE[mode],
         "degrees": degree_rows,
     }
     if mode == "approx":

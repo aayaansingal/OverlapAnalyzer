@@ -23,6 +23,7 @@ import contextlib
 import json
 import os
 import platform
+import socket
 import subprocess
 import sys
 import tempfile
@@ -94,17 +95,31 @@ class SystemPaths:
 
 
 class StageStatus:
-    """Per-system stage records. A stage counts as done only if it was marked complete *and* its output still exists."""
+    """
+    Per-system stage records. A stage counts as done only if it was marked complete with the current stage
+    version, its output still exists, and (for dependent stages) it was built from the current upstream stage.
+    Each completion gets a fresh token; downstream records store the token they were built from.
+    """
 
     def __init__(self, path: str):
         self.path = path
         self.stages = read_json(path, default={}) or {}
 
-    def is_complete(self, stage: str, required_file: str | None = None) -> bool:
+    def is_complete(self, stage: str, required_file: str | None = None, version: int | None = None,
+                    built_from: tuple[str, str] | None = None) -> bool:
         record = self.stages.get(stage, {})
         if record.get("state") != "complete":
             return False
+        if version is not None and record.get("version") != version:
+            return False
+        if built_from is not None:
+            upstream_key, upstream_token = built_from
+            if record.get(upstream_key) != upstream_token:
+                return False
         return required_file is None or os.path.exists(required_file)
+
+    def token(self, stage: str) -> str | None:
+        return self.stages.get(stage, {}).get("token")
 
     def record(self, stage: str, state: str, **details) -> None:
         self.stages[stage] = {"state": state, "updated": utc_timestamp(), **details}
@@ -151,3 +166,63 @@ def collect_provenance() -> dict:
         "git": git_info,
         "packages": package_versions,
     }
+
+
+class SweepLockedError(RuntimeError):
+    """Another live sweep process is writing to the same output directory."""
+
+
+class OutputDirectoryLock:
+    """
+    Exclusive lock on a sweep output directory, so two `run` invocations cannot interleave writes.
+    A lock left by a process that no longer exists on this host is treated as stale and taken over.
+    """
+
+    def __init__(self, output_dir: str):
+        self.path = os.path.join(output_dir, ".sweep.lock")
+        self.acquired = False
+
+    def owner_is_alive(self, owner: dict) -> bool:
+        if owner.get("host") != socket.gethostname():
+            return True     # Cannot check another machine's processes; assume live
+        try:
+            os.kill(int(owner.get("pid", -1)), 0)
+        except ProcessLookupError:
+            return False
+        except (PermissionError, ValueError):
+            return True
+        return True
+
+    def acquire(self) -> None:
+        owner = {"pid": os.getpid(), "host": socket.gethostname(), "started": utc_timestamp()}
+        for _ in range(2):
+            try:
+                file_descriptor = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except FileExistsError:
+                existing_owner = read_json(self.path, default={}) or {}
+                if self.owner_is_alive(existing_owner):
+                    raise SweepLockedError(
+                        f"{os.path.dirname(self.path)} is in use by process {existing_owner.get('pid')} on "
+                        f"{existing_owner.get('host')} (since {existing_owner.get('started')}). "
+                        f"If that process is gone, delete {self.path}.")
+                with contextlib.suppress(FileNotFoundError):
+                    os.remove(self.path)     # Stale lock from a dead process
+                continue
+            with os.fdopen(file_descriptor, "w", encoding="utf-8") as handle:
+                json.dump(owner, handle)
+            self.acquired = True
+            return
+        raise SweepLockedError(f"Could not acquire {self.path}.")
+
+    def release(self) -> None:
+        if self.acquired:
+            with contextlib.suppress(FileNotFoundError):
+                os.remove(self.path)
+            self.acquired = False
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, *exc_info):
+        self.release()

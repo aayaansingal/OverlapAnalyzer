@@ -278,6 +278,8 @@ def expand_system_entry(entry, context):
         raise ConfigError(f"{context}: custom 'atoms' have a fixed geometry; remove 'geometries'.")
     if molecule != "custom" and geometries == [None]:
         raise ConfigError(f"{context}: {molecule} needs 'geometries'.")
+    if molecule != "custom" and any(geometry <= 0 for geometry in geometries):
+        raise ConfigError(f"{context}: geometry values (bond lengths in Angstrom, or the 'h4' angle) must be positive.")
 
     n_atoms = entry.get("n_atoms")
     if molecule == "h_chain":

@@ -1,7 +1,15 @@
+import numpy as np
 import pytest
 
 from overlapanalyzer.sweep.spectrum import (TargetSelectionError, build_level_table, select_target_level,
-                                            summarize_spectrum, truncated_index_of)
+                                            summarize_spectrum, truncated_index_of, validate_spectrum)
+
+
+def rescaled_moments(energies, overlaps, rescale_values, max_power=10):
+    # calc_eigen convention: x = (2E - lower - upper) / (upper - lower) with (lower, upper) = rescale_values
+    lower, upper = rescale_values
+    x = (2 * np.array(energies) - lower - upper) / (upper - lower)
+    return [float(np.dot(overlaps, x ** k)) for k in range(max_power + 1)]
 
 
 def synthetic_eig_results():
@@ -14,6 +22,8 @@ def synthetic_eig_results():
         "symmetries": [[0.0, 1.0, 0.0, -1.0, 0.0, 0.0], [2, 2, 2, 2, 2, 2], [0.0, 2.0, 2.0, 2.0, 0.0, 0.0]],
         "exact_energies_truncated": [-1.9, -1.5, -1.0],
         "hf_energy": -1.7,
+        "rescale_values": [-1.0, -2.0],     # (E_max, E_0), as calc_eigen stores them by default
+        "moments_rescaled": rescaled_moments([-2.0, -1.9, -1.5, -1.0], [0.0, 0.6, 0.3, 0.1], (-1.0, -2.0)),
     }
 
 
@@ -59,3 +69,23 @@ def test_truncated_index_maps_energies():
     eig = synthetic_eig_results()
     assert truncated_index_of(eig, -1.5) == 1
     assert truncated_index_of(eig, -2.0) is None
+
+
+def test_validation_accepts_consistent_spectrum():
+    eig = synthetic_eig_results()
+    validation = validate_spectrum(eig, build_level_table(eig), "t1")
+    assert validation["moments_consistent"] and validation["moment_consistency_max_error"] < 1e-12
+    # Overlap-weighted <S^2> = 0.6*2 + 0.3*0 + 0.1*0 = 1.2: neither a pure singlet nor a pure triplet reference
+    assert not validation["reference_spin_consistent"]
+
+
+def test_validation_flags_moment_mismatch_and_wrong_reference_spin():
+    eig = synthetic_eig_results()
+    eig["overlaps"] = [0.0, 1.0, 0.0, 0.0]                       # reference is entirely the triplet level
+    eig["moments_rescaled"] = rescaled_moments(eig["exact_energies_no_degen"], eig["overlaps"], (-1.0, -2.0))
+    levels = build_level_table(eig)
+    assert validate_spectrum(eig, levels, "t1")["reference_spin_consistent"]
+    assert not validate_spectrum(eig, levels, "s1")["reference_spin_consistent"]   # the old calc_eigen s1 bug
+
+    eig["moments_rescaled"][3] += 1e-6
+    assert not validate_spectrum(eig, levels, "t1")["moments_consistent"]

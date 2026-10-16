@@ -126,6 +126,37 @@ def nearest_gaps(levels: list, target_level: dict, visibility_threshold: float) 
     }
 
 
+def validate_spectrum(eig_results: dict, levels: list, spin_label: str) -> dict:
+    """
+    Exact identities every diagonalization must satisfy; violations indicate a bug or numerical trouble.
+
+    - Moments: sum_i |<ref|i>|^2 x_i^k must equal the stored rescaled moment <ref|x^k|ref>, where x is the
+      energy mapped by rescale_values exactly as calc_eigen maps H. This ties the spectrum to the moments
+      that all bounds are computed from.
+    - Completeness: overlaps over all levels sum to 1.
+    - Reference spin: because H conserves S^2, the overlap-weighted <S^2> of the levels equals the reference's
+      <S^2>, which must match the spin label (s0/s1 singlet, t1 triplet).
+    """
+    overlaps = np.array([level["overlap"] for level in levels])
+    energies = np.array([level["energy"] for level in levels])
+    rescale_lower, rescale_upper = eig_results["rescale_values"]
+    rescaled_energies = (2 * energies - rescale_lower - rescale_upper) / (rescale_upper - rescale_lower)
+    stored_moments = np.array(eig_results["moments_rescaled"], dtype=float)
+    powers = np.arange(len(stored_moments))
+    spectral_moments = (overlaps[:, None] * rescaled_energies[:, None] ** powers[None, :]).sum(axis=0)
+    moment_error = float(np.max(np.abs(spectral_moments - stored_moments)))
+
+    s2_from_overlaps = float(np.dot(overlaps, [level["s2"] for level in levels]))
+    expected_s2 = EXPECTED_REFERENCE_S2[spin_label]
+    return {
+        "moment_consistency_max_error": moment_error,
+        "moments_consistent": moment_error < 1e-8,
+        "overlap_sum_error": float(abs(overlaps.sum() - 1.0)),
+        "reference_s2_error": abs(s2_from_overlaps - expected_s2),
+        "reference_spin_consistent": abs(s2_from_overlaps - expected_s2) < 1e-6,
+    }
+
+
 def summarize_spectrum(eig_results: dict, target: dict, spin_label: str) -> dict:
     """Exact spectral facts for one system and one target choice."""
     levels = build_level_table(eig_results)
@@ -158,6 +189,7 @@ def summarize_spectrum(eig_results: dict, target: dict, spin_label: str) -> dict
             "s2_from_overlaps": float(np.dot(overlaps, s2_values)),
             "overlap_sum": float(overlaps.sum()),
         },
+        "validation": validate_spectrum(eig_results, levels, spin_label),
         "levels_preview": levels[:10],
     }
 
