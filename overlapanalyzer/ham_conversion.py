@@ -1,6 +1,6 @@
 import os
 from .read_ham import  find_files, extract_numbers_from_filenames, load_mol_info, ensure_directory_exists
-from openfermion import load_operator, save_operator, jordan_wigner, is_hermitian
+from openfermion import load_operator, save_operator, jordan_wigner, is_hermitian #type: ignore
 from qcc_240202.utils import f2q_map
 # molecule = 'h2o/4e4o'
 
