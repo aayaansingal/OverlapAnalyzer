@@ -3,6 +3,22 @@ Overlap analysis module
 
 This repository continues development of [OverlapAnalyzer](https://github.com/JunanLin/OverlapAnalyzer), whose underlying scientific software was developed mainly by Junan Lin. Its history up to `1f1510c` (2025-12-08) is taken directly from that repository.
 
+### Differences from the original repository
+
+New:
+- **Parameter sweeps** (`overlapanalyzer/sweep`, `overlap-sweep` command): run many molecular configurations from one JSON config, with automatic target-state selection, cached and resumable results, and CSV summaries. See [Parameter sweeps](#parameter-sweeps).
+- **Single-run script** (`scripts/run_overlap_simulation.py`) for trying one configuration by hand.
+- **A PySCF-based Hamiltonian route** that works without the non-public `qcc_240202` package.
+- **Automated tests** (`tests/`) and example configs (`examples/sweeps/`).
+
+Fixed:
+- `OverlapEstimator` crashed in `approx` and `below` modes (duplicate keyword arguments).
+- `below` mode bounded the overlap *above* the energy threshold instead of below it (flipped energy rescaling).
+- `ham_gen` used RHF instead of ROHF for triplet active-space runs.
+- Plotting crashed when no LaTeX installation was present.
+- `krypy`, which fails to import on current SciPy, no longer breaks unrelated modules.
+- `requirements.txt` now lists every package the code imports.
+
 Library install
 ---------------
 
