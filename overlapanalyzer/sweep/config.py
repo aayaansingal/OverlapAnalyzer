@@ -354,8 +354,10 @@ def parse_analysis_entry(raw_analysis, context):
         raise ConfigError(f"{context}: poly_degrees must lie in [0, {MAX_MOMENT_DEGREE}] (moments stored by calc_eigen).")
 
     bound_extension = raw_analysis.get("bound_extension")
-    if "approx" in modes and (bound_extension is None or bound_extension <= 0):
-        raise ConfigError(f"{context}: approx mode needs a positive 'bound_extension'.")
+    # bound_extension is a fraction of the gap to each neighbouring level (gen_bound_pairs requires 0 < x < 1/2)
+    if "approx" in modes and (not isinstance(bound_extension, (int, float)) or not 0 < bound_extension < 0.5):
+        raise ConfigError(f"{context}: approx mode needs 'bound_extension' between 0 and 0.5 "
+                          "(a fraction of the energy gap to each neighbouring level).")
     energy_threshold = raw_analysis.get("energy_threshold")
     if "below" in modes and not (energy_threshold == "HF" or isinstance(energy_threshold, (int, float))):
         raise ConfigError(f"{context}: below mode needs 'energy_threshold' (a number in Hartree, or \"HF\").")

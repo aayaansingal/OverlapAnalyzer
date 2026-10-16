@@ -19,7 +19,7 @@ from overlapanalyzer.polynomial_majorisation_LB import OverlapEstimator
 
 MODE_DESCRIPTIONS = {
     "exact": "Overlap with the target level; constraints use the exact eigenvalues (LP via scipy linprog).",
-    "approx": "Overlap with the target level; eigenvalues known only within +/- bound_extension (SDP via cvxpy).",
+    "approx": "Overlap with the target level; each eigenvalue known only to within bound_extension x the gap to its neighbouring level (SDP via cvxpy).",
     "below": "Total overlap with all levels below energy_threshold; only the threshold and spectral range used (SDP via cvxpy).",
 }
 

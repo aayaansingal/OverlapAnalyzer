@@ -19,3 +19,7 @@ tutorials/
 *.egg-info/
 .venv/
 /sweeps/
+
+# Published documentation assets (exceptions to the patterns above)
+!docs/images/*.png
+!docs/results/**/*.csv

@@ -1,0 +1,16 @@
+{
+  "sweep_name": "demo_bound_convergence",
+  "description": "How the bounds tighten with polynomial degree (number of Hamiltonian moments) for N2 in a (6e, 6o) active space, near equilibrium and stretched. Used for docs/images/bound_convergence.png.",
+  "systems": [
+    {"molecule": "n2", "geometries": [1.1, 1.6], "active_space": {"active_electrons": 6, "active_spatial_orbitals": 6}}
+  ],
+  "analyses": [
+    {
+      "name": "ground",
+      "target": {"strategy": "lowest_with_overlap", "min_overlap": 1e-6},
+      "modes": ["exact", "approx"],
+      "poly_degrees": [2, 4, 6, 8, 10, 12, 14, 16, 18, 20],
+      "bound_extension": 0.02
+    }
+  ]
+}

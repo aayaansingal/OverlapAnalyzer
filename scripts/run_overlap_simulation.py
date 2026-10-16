@@ -41,7 +41,7 @@ recipe = {
     "poly_degrees": [2, 4, 6, 8],   # Polynomial degrees = number of Hamiltonian moments used
     "target_indices": [0],          # Which eigenstates to bound the overlap with
     "b_values": [1],                # Weight of each target state in the overlap being bounded
-    "bound_extension": 0.05,        # approx mode: half-width of the uncertainty window around each eigenvalue
+    "bound_extension": 0.05,        # approx mode: eigenvalue uncertainty as a fraction of the gap to each neighbour (< 0.5)
     "solver": "SCS",                # approx/below: "SCS" (free) or "MOSEK" (needs a license)
 }
 

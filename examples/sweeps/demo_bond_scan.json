@@ -1,0 +1,17 @@
+{
+  "sweep_name": "demo_bond_scan",
+  "description": "Hartree-Fock overlap with the ground state as hydrogen chains are stretched, with polynomial bounds computed from Hamiltonian moments. Used for docs/images/bond_scan.png.",
+  "systems": [
+    {"molecule": "h_chain", "n_atoms": 4, "geometries": {"start": 0.6, "stop": 3.0, "step": 0.1}},
+    {"molecule": "h_chain", "n_atoms": 6, "geometries": {"start": 0.6, "stop": 3.0, "step": 0.2}}
+  ],
+  "analyses": [
+    {
+      "name": "ground",
+      "target": {"strategy": "lowest_with_overlap", "min_overlap": 1e-6},
+      "modes": ["exact", "approx"],
+      "poly_degrees": [4, 8],
+      "bound_extension": 0.02
+    }
+  ]
+}

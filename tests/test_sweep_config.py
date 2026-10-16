@@ -59,6 +59,7 @@ def test_defaults_apply_and_duplicates_collapse():
     ({"systems": [{"molecule": "h2", "geometries": [0.0, 0.7]}]}, "must be positive"),
     ({"systems": [{"molecule": "h2", "geometries": [1.0], "active_space": {"active_electrons": 5, "active_spatial_orbitals": 2}}]}, "do not fit"),
     ({"analyses": [{"name": "a", "modes": ["approx"]}]}, "bound_extension"),
+    ({"analyses": [{"name": "a", "modes": ["approx"], "bound_extension": 0.7}]}, "between 0 and 0.5"),
     ({"analyses": [{"name": "a", "modes": ["below"]}]}, "energy_threshold"),
     ({"analyses": [{"name": "a", "modes": ["manual"]}]}, "not sweepable"),
     ({"analyses": [{"name": "a", "poly_degrees": [50]}]}, "poly_degrees"),
