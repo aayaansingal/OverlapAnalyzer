@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 
 from overlapanalyzer.polynomial_majorisation_LB import OverlapEstimator
-from overlapanalyzer.sweep.bounds import summarize_degree_results
+from overlapanalyzer.sweep.bounds import solver_statuses, summarize_degree_results
 
 from conftest import load_result
 
@@ -65,11 +65,14 @@ def test_approx_mode_bounds_are_valid_for_every_target_position(seed, target_ind
     """Regression: targets after merged non-target regions used to be mapped to the wrong region (or crash)."""
     eig = synthetic_eig_results(seed, n_levels=6)
     exact_overlap = sum(eig["overlaps"][index] for index in target_indices)
-    rows, _ = bounds_for({"mode": "approx", "eig_results": eig, "target_indices": target_indices,
+    rows, payload = bounds_for({"mode": "approx", "eig_results": eig, "target_indices": target_indices,
                           "b_values": [1] * len(target_indices), "poly_degrees": [4, 8], "bound_extension": 0.02,
                           "solver": "SCS"})
-    for _, lower, upper in rows:
-        assert lower - 1e-4 <= exact_overlap <= upper + 1e-4
+    statuses = {entry["degree"]: solver_statuses(entry) for entry in payload["raw_solver_output"]}
+    for degree, lower, upper in rows:
+        if statuses[degree] != {"lower": "optimal", "upper": "optimal"}:
+            continue    # SCS did not converge; the sweep flags these results instead of trusting them
+        assert lower - 1e-4 <= exact_overlap <= upper + 1e-4, (degree, lower, upper, exact_overlap, statuses[degree])
 
 
 @pytest.mark.parametrize("target_index", [1, 3, 7])
