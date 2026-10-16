@@ -102,7 +102,8 @@ def calc_eigen(fileDir, mol_name, geometry, spin, num_eigs=10, use_eigsh=False, 
         elif spin == 't1':
             hf_state_full = jw_configuration_state([i for i in range(n_elec-1)] + [n_elec], n_spin_orb)
         elif spin == 's1':
-            hf_state_full = 1/np.sqrt(2)*(jw_configuration_state([i for i in range(n_elec-1)] + [n_elec+1], n_spin_orb) + jw_configuration_state([i for i in range(n_elec-2)] + [n_elec-1, n_elec], n_spin_orb))
+            # Open-shell singlet (HOMO alpha LUMO beta - HOMO beta LUMO alpha)/sqrt(2); a '+' here gives the Sz=0 triplet
+            hf_state_full = 1/np.sqrt(2)*(jw_configuration_state([i for i in range(n_elec-1)] + [n_elec+1], n_spin_orb) - jw_configuration_state([i for i in range(n_elec-2)] + [n_elec-1, n_elec], n_spin_orb))
         hf_state_full = np.expand_dims(hf_state_full, axis=1)
         state = jw_number_restrict_state(hf_state_full, n_elec, n_qubits=n_spin_orb)
 

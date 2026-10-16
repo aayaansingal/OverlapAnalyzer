@@ -248,7 +248,6 @@ def process_bound_pairs(bound_pairs, target_indices, dense_info=(None, None)):
     """
     if 0 in target_indices and dense_info[0] is not None:
         raise ValueError("dense_info[0] cannot be used since 0 is in target_indices.")
-    nonzero_b_indices = target_indices.copy() if dense_info[0] is None else np.array(target_indices)+1
     def _insert_lower_bound(pair_list, bound):
         pair_list.insert(1, [bound, pair_list[0][1]])
         pair_list[0] = (pair_list[0][0], bound)
@@ -259,11 +258,17 @@ def process_bound_pairs(bound_pairs, target_indices, dense_info=(None, None)):
     boundaries = compute_boundaries(target_indices, len(bound_pairs))
     new_bound_pairs = [[bound_pairs[lower][0], bound_pairs[upper][1]] for lower, upper in boundaries]
     incl_endpoints = [True for _ in range(len(new_bound_pairs))]
+    # Non-target levels between targets are merged into single regions, so a target's position in the region
+    # list differs from its level index once a merge happens before it. b values must go to region positions.
+    region_of_target = {index: boundaries.index((index, index)) for index in target_indices}
+    target_regions = [region_of_target[index] for index in target_indices]
+    nonzero_b_indices = target_regions.copy() if dense_info[0] is None else np.array(target_regions)+1
     # The following lines define what "correct locations" mean for the dense region
-    if dense_info[0] is not None and new_bound_pairs[0][0] < dense_info[0] < new_bound_pairs[target_indices[0]][1]:
+    if dense_info[0] is not None and new_bound_pairs[0][0] < dense_info[0] < new_bound_pairs[min(target_regions)][1]:
         _insert_lower_bound(new_bound_pairs, dense_info[0])
         incl_endpoints.insert(0, False)
-    if dense_info[1] is not None and new_bound_pairs[target_indices[-1]][0] < dense_info[1] < new_bound_pairs[-1][1]:
+    last_target_region = max(target_regions) + (1 if dense_info[0] is not None and not incl_endpoints[0] else 0)
+    if dense_info[1] is not None and new_bound_pairs[last_target_region][0] < dense_info[1] < new_bound_pairs[-1][1]:
         _insert_upper_bound(new_bound_pairs, dense_info[1])
         incl_endpoints.insert(-1, False)
     return new_bound_pairs, incl_endpoints, nonzero_b_indices
