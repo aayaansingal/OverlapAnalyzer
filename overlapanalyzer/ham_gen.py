@@ -119,7 +119,7 @@ def gen_hamiltonian(fileDir, mol_name, mode, small_atom_basis='sto-3g', **kwargs
     # h_ferm = construct_fermionic_operator(mol, n_elec=n_elec, n_orbs=n_orbs, mo=mf.mo_coeff)
     if kwargs.get('create_CAS')==True:
         CAS_str = 'CAS'
-        if kwargs.get('spin') == 's0' or 's1':
+        if kwargs.get('spin') in ('s0', 's1'):
             mf = scf.RHF(mol).run()
         elif kwargs.get('spin') == 't1':
             mf = scf.ROHF(mol).run()

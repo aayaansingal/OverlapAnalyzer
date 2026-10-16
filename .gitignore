@@ -18,3 +18,4 @@ tutorials/
 *.pkl
 *.h5
 *.egg-info/
+.venv/

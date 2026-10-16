@@ -1642,7 +1642,9 @@ class OverlapEstimator:
                     c_UB = self.exact_mode_coeffs[deg]['c_UB']
                     initial_guesses[deg] = {'c_LB': c_LB, 'c_UB': c_UB}
         
-        recipe_for_opt = {k: v for k, v in recipe.items() if k != "intervals"}
+        # Drop recipe entries that are passed to sip.optimize() explicitly or via **kwargs, to avoid duplicate keyword arguments
+        explicit_args = {"intervals", "poly_degrees", "visualize", "plot_title", "initial_guesses"}
+        recipe_for_opt = {k: v for k, v in recipe.items() if k not in explicit_args and k not in kwargs}
         solver_output = sip.optimize(
             intervals,
             region_b_list,
@@ -1772,22 +1774,28 @@ class OverlapEstimator:
         # Prepare SIP intervals
         E0_rescale, Emax_rescale = eig_results['rescale_values']
         threshold_rescaled = rescale_E(energy_threshold, E0_rescale, Emax_rescale)
+        # calc_eigen saves rescale_values as (E_max, E_0) by default, which maps the ground state to x = +1,
+        # so the "below threshold" region can lie on either side of threshold_rescaled.
+        ground_rescaled = rescale_E(min(exact_energies), E0_rescale, Emax_rescale)
         
-        if threshold_rescaled <= -1:
+        if threshold_rescaled <= -1 or threshold_rescaled >= 1:
+             # Threshold outside the rescaled spectrum: either every state or no state lies below it
              intervals = [(-1, 1)]
-             region_b_list = [0]
-        elif threshold_rescaled >= 1:
-             intervals = [(-1, 1)]
-             region_b_list = [1]
-        else:
+             region_b_list = [1 if energy_threshold >= max(E0_rescale, Emax_rescale) else 0]
+        elif ground_rescaled < threshold_rescaled:
              intervals = [(-1, threshold_rescaled), (threshold_rescaled, 1)]
              region_b_list = [1, 0]
+        else:
+             intervals = [(-1, threshold_rescaled), (threshold_rescaled, 1)]
+             region_b_list = [0, 1]
              
         values = constraint_info.moments
         
         sip = PolyBounds_SIP(values, poly_degree=max_degree, O_exact=exact_overlap)
         
-        recipe_for_opt = {k: v for k, v in recipe.items() if k != "intervals"}
+        # Drop recipe entries that are passed to sip.optimize() explicitly or via **kwargs, to avoid duplicate keyword arguments
+        explicit_args = {"intervals", "poly_degrees", "visualize", "plot_title", "initial_guesses"}
+        recipe_for_opt = {k: v for k, v in recipe.items() if k not in explicit_args and k not in kwargs}
         solver_output = sip.optimize(
             intervals,
             region_b_list,

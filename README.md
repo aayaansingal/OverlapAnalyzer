@@ -33,3 +33,14 @@ Usage
 -----
 Calculating wavefunction overlaps with Hamiltonian eigenstates from Hamiltonian power expectation values.
 arXiv: https://arxiv.org/abs/2503.12224
+
+Running a simulation
+--------------------
+`scripts/run_overlap_simulation.py` runs the full pipeline: build a molecular Hamiltonian, compute the exact spectrum with `eigen.calc_eigen`, then bound the reference state's overlap with `OverlapEstimator.compute_bounds`. Edit the CONFIGURATION block at the top of the script, then run from the repository root:
+
+```
+python -m venv .venv && .venv/bin/pip install -r requirements.txt && .venv/bin/pip install -e .
+.venv/bin/python scripts/run_overlap_simulation.py
+```
+
+Output goes to `gen_hams/<molecule>/`, which is gitignored: `ham_fer/` (Hamiltonian), `eigen/` (spectrum, overlaps and moments as JSON) and `bounds/` (`all_payloads.json` plus per-degree plots).

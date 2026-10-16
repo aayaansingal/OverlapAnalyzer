@@ -1,3 +1,4 @@
+import shutil
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from matplotlib.ticker import MaxNLocator
@@ -11,8 +12,10 @@ from scipy.sparse import csr_matrix, csc_matrix
 from overlapanalyzer.read_ham import find_files, quick_load
 from overlapanalyzer.polynomial_estimates import chebval, an_list
 
+# Publication styling uses LaTeX text rendering when a LaTeX install is available;
+# otherwise fall back to matplotlib's built-in mathtext so plotting still works.
 plt.rcParams.update({
-    "text.usetex": True,
+    "text.usetex": shutil.which("latex") is not None,
     "font.family": "serif",
     "font.sans-serif": "Computer Modern Roman",
     "font.size": 16,
