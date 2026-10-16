@@ -1,91 +1,56 @@
 """
-End-to-end overlap simulation: molecule -> Hamiltonian -> exact eigen data -> polynomial overlap bounds.
+Single overlap simulation: molecule -> Hamiltonian -> exact eigen data -> polynomial overlap bounds.
 
 Edit the CONFIGURATION section below, then run from the repository root:
 
     .venv/bin/python scripts/run_overlap_simulation.py
 
-Stage 1 builds the fermionic Hamiltonian with openfermionpyscf (a stand-in for ham_gen.gen_hamiltonian,
-which needs the non-public qcc_240202 package) and saves it in the same file layout ham_gen uses.
-Stages 2 and 3 use the library directly: eigen.calc_eigen and polynomial_majorisation_LB.OverlapEstimator.
+This is the hands-on, one-system version of the sweep framework (overlapanalyzer.sweep), and it reuses
+the sweep's Hamiltonian and diagonalization stages. To scan many geometries, bases or spins with cached,
+resumable results, write a sweep config instead (see examples/sweeps/) and run `overlap-sweep run CONFIG`.
 """
-import os
-import csv
 import json
-from math import comb
+import os
 
 import matplotlib
 matplotlib.use("Agg")  # Save plots to files instead of opening windows
 
-from openfermion import MolecularData, get_fermion_operator, save_operator
-from openfermionpyscf import run_pyscf
-
-from overlapanalyzer.eigen import calc_eigen
 from overlapanalyzer.polynomial_majorisation_LB import OverlapEstimator
 from overlapanalyzer.read_ham import ensure_directory_exists
+from overlapanalyzer.sweep.config import SystemSpec
+from overlapanalyzer.sweep.hamiltonian import generate_hamiltonian
+from overlapanalyzer.sweep.spectrum import run_exact_diagonalization
 
 
 # ============================== CONFIGURATION ==============================
 
-# --- Molecule ---
-mol_name = "H4"                 # Label used in output filenames
-num_hydrogen = 4                # Linear hydrogen chain with this many atoms
-bond_length = 1.5               # Angstrom, spacing between neighbouring atoms
-basis = "sto-3g"
-spin_label = "s0"               # 's0' (singlet HF reference), 't1' or 's1' (see eigen.calc_eigen)
+# --- Molecule (any molecule from the sweep config format works here too) ---
+system = SystemSpec(
+    molecule="h_chain",         # 'h_chain', or one of h2, lih, beh2, h2o, n2, h4, h4_linear, nh3, h2x2
+    n_atoms=4,                  # h_chain only
+    geometry=1.5,               # Bond length in Angstrom for chains and most library molecules
+    basis="sto-3g",
+    spin="s0",                  # 's0' (singlet HF reference), 't1' or 's1' (see eigen.calc_eigen)
+    active_space=None,          # e.g. {"active_electrons": 2, "active_spatial_orbitals": 5}
+)
 
 # --- Overlap-bound recipe (passed to OverlapEstimator.compute_bounds) ---
-# Indices refer to the distinct eigenvalues (with nonzero overlap) sorted from lowest energy.
+# target_indices refer to distinct energy levels sorted from lowest energy (0 = lowest level).
 recipe = {
     "mode": ["exact", "approx"],    # Any of "exact", "approx", "below", "manual"
     "poly_degrees": [2, 4, 6, 8],   # Polynomial degrees = number of Hamiltonian moments used
-    "target_indices": [0],          # Which eigenstates to bound the overlap with (0 = ground state)
+    "target_indices": [0],          # Which eigenstates to bound the overlap with
     "b_values": [1],                # Weight of each target state in the overlap being bounded
     "bound_extension": 0.05,        # approx mode: half-width of the uncertainty window around each eigenvalue
     "solver": "SCS",                # approx/below: "SCS" (free) or "MOSEK" (needs a license)
 }
 
 # --- Output ---
-output_root = "gen_hams"        # Gitignored; each molecule gets its own subfolder
+output_root = "gen_hams"        # Gitignored; each system gets its own subfolder
 save_plots = True
+max_dimension = 6000            # Refuse dense diagonalizations larger than this
 
 # ===========================================================================
-
-
-def build_hydrogen_chain(num_atoms, spacing):
-    return [("H", (0.0, 0.0, i * spacing)) for i in range(num_atoms)]
-
-
-def generate_hamiltonian(data_dir, geometry_label):
-    """Run RHF with PySCF and save the fermionic Hamiltonian where calc_eigen expects it."""
-    geometry = build_hydrogen_chain(num_hydrogen, bond_length)
-    multiplicity = 3 if spin_label == "t1" else 1
-    molecule = MolecularData(geometry, basis, multiplicity, charge=0,
-                             filename=os.path.join(data_dir, f"{mol_name}_{geometry_label}"))
-    molecule = run_pyscf(molecule, run_scf=True)
-
-    n_elec = molecule.n_electrons
-    n_spin_orb = 2 * molecule.n_orbitals
-    hilbert_dim = comb(n_spin_orb, n_elec)
-    print(f"{mol_name}: {n_elec} electrons, {n_spin_orb} spin orbitals, "
-          f"number-conserving dimension {hilbert_dim}, HF energy {molecule.hf_energy:.8f}")
-    if hilbert_dim > 5000:
-        print("Warning: calc_eigen diagonalizes a dense matrix of this dimension; this may be slow.")
-
-    hamiltonian_fermion = get_fermion_operator(molecule.get_molecular_hamiltonian())
-    ham_dir = os.path.join(data_dir, "ham_fer")
-    ensure_directory_exists(ham_dir)
-    ham_filename = f"{mol_name}_{geometry_label}_{n_elec}_{n_spin_orb}_{spin_label}.data"
-    save_operator(hamiltonian_fermion, file_name=ham_filename, data_directory=ham_dir,
-                  allow_overwrite=True, plain_text=True)
-
-    # Same info.csv layout as ham_gen.gen_hamiltonian
-    with open(os.path.join(data_dir, "info.csv"), "w") as info_file:
-        writer = csv.writer(info_file)
-        writer.writerow(["N_electron", "N_spin_orb"])
-        writer.writerow([n_elec, n_spin_orb])
-
-    return molecule.hf_energy, n_elec, n_spin_orb
 
 
 def print_bounds(results):
@@ -99,20 +64,20 @@ def print_bounds(results):
 
 
 def main():
-    geometry_label = f"{bond_length}"
-    data_dir = os.path.join(output_root, mol_name)
+    data_dir = os.path.join(output_root, system.label)
     ensure_directory_exists(data_dir)
 
     # Stage 1: Hamiltonian
-    hf_energy, n_elec, n_spin_orb = generate_hamiltonian(data_dir, geometry_label)
+    info = generate_hamiltonian(system, data_dir)
+    print(f"{system.label}: {info.n_electrons} electrons, {info.n_spin_orbitals} spin orbitals, "
+          f"number-conserving dimension {info.hilbert_dimension}, HF energy {info.hf_energy:.8f}")
 
     # Stage 2: exact spectrum, overlaps of the reference state, and Hamiltonian moments
-    calc_eigen(data_dir, mol_name, geometry_label, spin_label, hf_energy=hf_energy)
-    eigen_path = os.path.join(data_dir, "eigen", f"{mol_name}_{geometry_label}_{n_elec}_{n_spin_orb}_{spin_label}_eigen.json")
+    eigen_path = run_exact_diagonalization(system, info, data_dir, max_dimension)
     with open(eigen_path, "r") as eigen_file:
         eig_results = json.load(eigen_file)
-    print(f"Lowest distinct energies with nonzero overlap: {eig_results['exact_energies_truncated'][:5]}")
-    print(f"Their exact overlaps: {eig_results['overlaps_truncated'][:5]}")
+    print(f"Lowest distinct energies: {eig_results['exact_energies_truncated'][:5]}")
+    print(f"Their exact overlaps:     {eig_results['overlaps_truncated'][:5]}")
 
     # Stage 3: polynomial bounds on the overlap from the moments
     results_dir = os.path.join(data_dir, "bounds")

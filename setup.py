@@ -20,6 +20,9 @@ setup(
     url='',
     packages=find_packages(),
     install_requires=requirements,
+    entry_points={
+        'console_scripts': ['overlap-sweep=overlapanalyzer.sweep.cli:main'],
+    },
     classifiers=[
         "Intended Audience :: Developers",
         "Intended Audience :: Science/Research",

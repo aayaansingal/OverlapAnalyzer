@@ -1,0 +1,26 @@
+{
+  "sweep_name": "h_chain_bond_scan",
+  "description": "Linear H4 and H6 chains stretched from compressed to dissociated; HF-reference overlap with the lowest visible state.",
+  "defaults": {"basis": "sto-3g", "spin": "s0", "backend": "pyscf"},
+  "systems": [
+    {"molecule": "h_chain", "n_atoms": 4, "geometries": {"start": 0.7, "stop": 2.5, "num": 7}},
+    {"molecule": "h_chain", "n_atoms": 6, "geometries": [1.0, 1.5, 2.0]}
+  ],
+  "analyses": [
+    {
+      "name": "ground_exact",
+      "target": {"strategy": "lowest_with_overlap", "min_overlap": 1e-6},
+      "modes": ["exact"],
+      "poly_degrees": [2, 4, 6, 8, 10]
+    },
+    {
+      "name": "ground_approx",
+      "target": {"strategy": "lowest_with_overlap", "min_overlap": 1e-6},
+      "modes": ["approx"],
+      "poly_degrees": [4, 8],
+      "bound_extension": 0.05,
+      "solver": "SCS"
+    }
+  ],
+  "limits": {"max_dimension": 6000}
+}

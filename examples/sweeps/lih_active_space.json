@@ -1,0 +1,22 @@
+{
+  "sweep_name": "lih_active_space",
+  "description": "LiH bond scan in a (2e, 5o) frozen-core active space, singlet and triplet references; includes the 'below HF' mode.",
+  "systems": [
+    {
+      "molecule": "lih",
+      "geometries": [1.2, 1.6, 2.0, 3.0],
+      "basis": "sto-3g",
+      "spin": ["s0", "t1"],
+      "active_space": {"active_electrons": 2, "active_spatial_orbitals": 5}
+    }
+  ],
+  "analyses": [
+    {
+      "name": "sector_ground",
+      "target": {"strategy": "lowest_in_sector"},
+      "modes": ["exact", "below"],
+      "poly_degrees": [4, 8, 12],
+      "energy_threshold": "HF"
+    }
+  ]
+}
