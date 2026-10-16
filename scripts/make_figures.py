@@ -9,7 +9,6 @@ All plotted numbers come straight from the sweep outputs.
 """
 import json
 import os
-import shutil
 
 import matplotlib
 matplotlib.use("Agg")
@@ -51,8 +50,12 @@ def run_demo_sweeps() -> dict:
         run_sweep(config, output_dir, jobs=4)
         published_dir = os.path.join(RESULTS_DIR, sweep_name)
         os.makedirs(published_dir, exist_ok=True)
+        # Published copies drop wall-clock timings (machine-dependent), so regenerating them only changes
+        # the files when the science changes; the full sweep outputs keep the timings
         for table in ("results.csv", "bounds.csv"):
-            shutil.copy(os.path.join(output_dir, table), os.path.join(published_dir, table))
+            frame = pd.read_csv(os.path.join(output_dir, table))
+            frame = frame[[column for column in frame.columns if not column.endswith("_seconds")]]
+            frame.to_csv(os.path.join(published_dir, table), index=False)
         output_dirs[sweep_name] = (config, output_dir)
     return output_dirs
 
