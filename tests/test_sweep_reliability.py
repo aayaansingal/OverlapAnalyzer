@@ -53,10 +53,18 @@ def assert_same_bounds(expected, actual):
     merged["difference"] = abs(difference).max(axis=1)
     lp_rows = merged["mode"] == "exact"
     optimal_sdp_rows = ~lp_rows & (merged["solver_status_expected"] == OPTIMAL) & (merged["solver_status_actual"] == OPTIMAL)
-    report = merged[keys + ["difference", "solver_status_expected", "solver_status_actual"]]
-    assert merged.loc[lp_rows, "difference"].max() < 1e-9, report[lp_rows].to_string()
+
+    def one_line_report(rows, limit):
+        # Single line, so CI's failure annotation shows the offending rows
+        offending = merged[rows & (merged["difference"] >= limit)]
+        return " | ".join(f"{row.system_id[:20]} {row.mode} deg{row.degree} diff={row.difference:.3g} "
+                          f"status {row.solver_status_expected} vs {row.solver_status_actual}"
+                          for row in offending.itertuples())
+
+    assert merged.loc[lp_rows, "difference"].max() < 1e-9, "LP rows differ: " + one_line_report(lp_rows, 1e-9)
     if optimal_sdp_rows.any():
-        assert merged.loc[optimal_sdp_rows, "difference"].max() < 1e-3, report[optimal_sdp_rows].to_string()
+        assert merged.loc[optimal_sdp_rows, "difference"].max() < 1e-3, \
+            "optimal SDP rows differ: " + one_line_report(optimal_sdp_rows, 1e-3)
 
 
 # --- Cache validity -------------------------------------------------------------------------------
