@@ -1,6 +1,8 @@
 Overlap analysis module
 ===============================
 
+This repository continues development of [OverlapAnalyzer](https://github.com/JunanLin/OverlapAnalyzer), whose underlying scientific software was developed mainly by Junan Lin. Its history up to `1f1510c` (2025-12-08) is taken directly from that repository.
+
 Library install
 ---------------
 
@@ -20,6 +22,12 @@ The dependency on QuantumMAMBO needs some extra care since the juliacall package
 ```
 python setup-julia.py
 ```
+
+Some dependencies need separate handling:
+
+- `qcc_240202` (iQCC/QCC routines used by `ham_gen`, `ham_conversion` and `iQCC`) is not on PyPI and must be installed separately.
+- `Mosek` (used by `polynomial_majorisation_LB` through `cvxpy`) needs a MOSEK license file.
+- `krypy` is only needed for `alg_LinearOp.calculateInnerProducts` and `precond_utils`. Its latest release (2.2.0) does not import on recent SciPy versions.
 
 Usage
 -----

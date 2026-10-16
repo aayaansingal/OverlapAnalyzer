@@ -17,3 +17,4 @@ tutorials/
 *.pdf
 *.pkl
 *.h5
+*.egg-info/

@@ -1,4 +1,5 @@
 juliacall
+juliapkg
 pyscf
 openfermionpyscf
 numpy
@@ -6,6 +7,9 @@ openfermion
 pathos
 scipy
 sympy
-argparse
 matplotlib
+pandas
 qulacs
+cvxpy
+Mosek
+krypy
