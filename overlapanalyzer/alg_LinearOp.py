@@ -9,7 +9,6 @@ from scipy.sparse.linalg import gmres, inv
 import time
 from openfermion import QubitOperator, get_sparse_operator
 from openfermion.linalg import get_linear_qubit_operator_diagonal
-from krypy.linsys import LinearSystem, Gmres
 
 from overlapanalyzer.eigen import sort_eigen
 from overlapanalyzer.contour_integration import sum_gauss_points, getContourDataFromEigsh, getContourDataFromEndPoints
@@ -538,6 +537,9 @@ def conjugate_gradient(A, b, x0=None, tol=1e-8, max_iter=100):
     return {"method": method_list, "iterations": k, "matvec_list": matvec_list, "vecvec_list": vecvec_list}
 
 def calculateInnerProducts(H_q, phi, zi, initial_state, preconditioner, tol=1e-5, maxiter=100):
+    # Imported lazily: krypy 2.2.0 fails to import on recent SciPy (removed scipy.sparse.sputils.isintlike),
+    # which would otherwise break every module that depends on alg_LinearOp.
+    from krypy.linsys import LinearSystem, Gmres
     print("Solving for z = ", zi)
     linear_system = LinearSystem(get_sparse_operator(QubitOperator('', zi)-H_q), phi, Ml=preconditioner)
     solver = Gmres(linear_system, x0=initial_state, explicit_residual=True, store_all_xk=True, tol=tol, maxiter=maxiter)
