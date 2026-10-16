@@ -243,4 +243,4 @@ juliapkg.json, setup-julia.py   optional Julia/QuantumMAMBO setup
 
 If you use the bounding method, please cite the paper above. The underlying research code is by Junan Lin; see the [original repository](https://github.com/JunanLin/OverlapAnalyzer).
 
-No license file has been added yet, so default copyright applies until one is chosen.
+Released under the [MIT License](LICENSE).

@@ -19,6 +19,7 @@ setup(
     long_description=open('README.md', encoding='utf-8').read(),
     long_description_content_type='text/markdown',
     url='https://github.com/aayaansingal/OverlapAnalyzer',
+    license='MIT',
     packages=find_packages(exclude=['tests', 'tests.*']),
     install_requires=requirements,
     extras_require={
@@ -32,6 +33,7 @@ setup(
     },
     classifiers=[
         "Intended Audience :: Science/Research",
+        "License :: OSI Approved :: MIT License",
         "Programming Language :: Python :: 3",
         "Topic :: Scientific/Engineering :: Chemistry",
         "Topic :: Scientific/Engineering :: Physics",
